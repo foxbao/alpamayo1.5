@@ -191,6 +191,7 @@ def make_camera_grid(
     image_frames: torch.Tensor,
     camera_indices: torch.Tensor | None = None,
     ncols: int = 3,
+    frame_idx: int = -1,
 ) -> np.ndarray:
     """Arrange multi-camera image frames into a 2x3 grid for display.
 
@@ -206,12 +207,13 @@ def make_camera_grid(
         image_frames: Shape ``[N_cameras, num_frames, C, H, W]`` uint8 tensors.
         camera_indices: Optional camera index tensor from ``data["camera_indices"]``.
         ncols: Number of columns in the grid.
+        frame_idx: Which temporal frame to render (default ``-1`` = the latest/t0 frame).
 
     Returns:
         Numpy array of the grid image, shape ``[grid_H, grid_W, 3]``, uint8.
     """
-    last_frames = image_frames[:, -1]  # [N_cameras, C, H, W]
-    frames = last_frames.permute(0, 2, 3, 1).numpy()  # [N, H, W, C]
+    selected_frames = image_frames[:, frame_idx]  # [N_cameras, C, H, W]
+    frames = selected_frames.permute(0, 2, 3, 1).numpy()  # [N, H, W, C]
     h, w = frames.shape[1], frames.shape[2]
 
     if camera_indices is not None:
