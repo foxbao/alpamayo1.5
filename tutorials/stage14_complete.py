@@ -1,4 +1,4 @@
-"""Stage 14: 完整输入 + CoC —— 历史 + 图片一起进 CosmosReason（最接近真实 Alpamayo）
+"""Stage 14: 完整输入 + CoC —— 历史 + 图片一起进 CosmosReason（toy 中最完整的输入侧示例）
 
 对比 stage13：这里把「历史轨迹」也作为输入，和历史轨迹编码一起拼进 CosmosReason
 的输入序列，再自回归生成 CoC。这才是真实 VLM 的完整输入侧。

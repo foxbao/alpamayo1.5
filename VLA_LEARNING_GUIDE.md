@@ -49,7 +49,8 @@
   ↓ 6) action_to_traj (alpamayo1_5.py:384)
   ↓    把采样的动作 (accel, curvature) 积分成 (xyz, rotation) 轨迹
 
-输出: pred_xyz (B, num_samples, 1, 64, 3), pred_rot, CoC 文本
+输出: pred_xyz (B, num_traj_sets, num_traj_samples, 64, 3), pred_rot, CoC 文本
+      （注意维度顺序：`(b ns nj) -> b ns nj`，ns=num_traj_sets 在前，nj=num_traj_samples 在后）
 ```
 
 **先记住这条主链**，下面每一层都是往这条链上填细节。

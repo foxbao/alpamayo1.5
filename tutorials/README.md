@@ -78,7 +78,7 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 11 | `stage11_fusion.py` | 多模态融合（收官） | 历史+图片+文本 三路 token concat 成一个 condition |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 文本标签标识相机 + concat，多相机怎么融 |
 | 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成推理，隐状态当 condition（对齐真实 VLM） |
-| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason（toy 里最完整的输入侧；仍与真实有差距，见 §九） |
+| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason（toy 里最完整的输入侧；仍与真实有差距，见 §六） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 引导权重 w 放大条件：`v=(1-w)·v_uncond + w·v_cond`，w>1 外推 |
 
 **演进脉络（每个 stage 相对上一个改了什么）：**
@@ -166,7 +166,18 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 
 **① 条件机制**：toy 用显式的第二个 attention（`cross_attn(query=动作, key/value=条件)`）；
 真实代码是把 VLM 的 **KV cache 对象**直接传给 expert 当 `past_key_values`（`alpamayo1_5.py:304,349`）。
-**效果等价**（都是让动作 token 注意到条件 token），但真实实现省掉了重复计算，也更省显存。
+
+**实测（`real3_kv_cache.py`，CPU）**：
+
+| 对比 | 结果 |
+|---|---|
+| 输出数值 | **完全相同**（最大差异 `0.00e+00`） |
+| 条件的 K/V 投影次数（10 步扩散） | toy 10 次 ↔ 真实 **1 次** |
+| 只省投影，实测加速 | 仅 **1.7 倍**（attention 本身仍要 O(L)） |
+| **真正的大头**：每步过 transformer 的 token 数 | 前缀+动作（3136）↔ **只有动作（64）** → **34 倍** |
+
+**关键结论**：KV cache 省的不是「条件的投影」，而是**整个前缀的前向计算**——
+每步的计算量从 3136 tokens 降到 64 tokens。toy 的写法数学上没错，但在真实规模下会慢 30~50 倍。
 
 **② CFG 的无条件分支**：toy 学了一个「空条件 embedding」来表示「无指令」；
 真实代码是**从输入序列里删掉 `<|route_start|>...<|route_end|>` 那一段**（`nav_utils.remove_nav_text`），
@@ -182,6 +193,63 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | LLM 的 transformer 层 | 自回归生成 CoC | `CausalBlock` 堆（即「Cosmos Reason Backbone」） |
 
 所以「Text Encoder」和「Cosmos Reason Backbone」**不是两个模型**，而是 Cosmos-Reason2 这一个模型内部的两部分；真正的第二个模型是 `self.expert`（Trajectory Decoder / 去噪器）。
+
+### 实测对照（`real1_input_trace.py`）
+
+上面是读代码总结的；下面是**真实跑一遍**测出来的（纯 CPU，不需加载 10B 模型）：
+
+| 项 | toy（stage13） | 真实（实测） |
+|---|---|---|
+| 序列长度 | 17 视觉 + 4 文本 | **3086**（2880 视觉 + 约 206 文本） |
+| 图片占比 | ~0% | **93%** |
+| 每相机帧数 | 1 | **4**（用文字标签 `frame 0..3` 标注） |
+| 历史轨迹 | 独立 encoder 输出 | **48 个 `<\|traj_history\|>` 占位符**（位置 3013~3060），待替换 |
+| 生成起点 | `<bos>` | `<\|cot_start\|>` 在**序列末尾**（位置 3085） |
+| 相机同步 | — | **不同步**：各相机曝光时刻差 ~27ms |
+| 时间戳 | 不用 | `relative_timestamps` 算了但**未传给模型** |
+| 外参 | 不用 | 不用（靠相机名文字标签 + ego 历史） |
+
+**三个最重要的实测结论**：
+
+1. **序列 93% 是图片**——多相机 × 4 帧把序列几乎塞满视觉 token，这是真实推理吃显存的主因
+2. **时间信息只靠「`frame N` 标签 + 序列顺序」传递**，真实时间戳没进模型
+3. **外参完全不用**——相机几何是「隐式」学进权重的（详见 §七）
+
+跑法：`python tutorials/real1_input_trace.py`（纯 CPU，约 1 分钟）
+
+**`real2_inference_trace.py`（后半段：tokens → 轨迹，需 GPU）实测**：
+
+| 步骤 | 实测结果 |
+|---|---|
+| 模型规模 | **11.08 B** 参数 |
+| 模型构成 | `vlm = Qwen3VLForConditionalGeneration`（印证 §六 的架构判断）<br>`expert = Qwen3VLTextModel`、`action_space = UnicycleAccelCurvatureActionSpace`、`diffusion = FlowMatching` |
+| 历史 token 化 | 位置 3013~3060 的 48 个占位符 → 真实 token id（如 `154669, 155176, ...`） |
+| CoC 生成后 | `<\|traj_future_start\|>` 的后一位 = **3103**（diffusion token 从这里开始） |
+| 扩散采样 | `batch_size=1, n_steps=10` → 动作 `(1, 64, 2)` |
+| 最终输出 | `pred_xyz (1, 1, 1, 64, 3)`、`pred_rot (1, 1, 1, 64, 3, 3)` |
+
+跑法：`CUDA_VISIBLE_DEVICES=1 python tutorials/real2_inference_trace.py`（需 GPU，避开被占用的 GPU 0）
+
+**`real3_kv_cache.py` / `real4_traj_roundtrip.py` —— 两个动手实验**
+
+`real3`：验证 §六 的「结构差异①」（KV cache）——输出**数值完全相同**，但每步过 transformer 的
+token 数从 3136 降到 64 → **34 倍**加速。KV cache 省的不是「条件的投影」，是**整个前缀的前向**。
+
+`real4`：轨迹几何 round-trip（用**真实**动作空间 + tokenizer）：
+
+| | 误差 |
+|---|---|
+| 连续 round-trip（轨迹→动作→轨迹） | mean **0.0344 m** |
+| 量化 round-trip（轨迹→token→轨迹） | mean **0.0360 m** |
+| **量化额外损失** | **+5%**（0.0016 m） |
+
+**两个结论**：
+1. **量化几乎无损**——分辨率达 0.0045 m/s²（加速度）、0.00017 1/m（曲率）。这解释了为什么
+   Alpamayo 敢「训练用离散 token、推理用连续 diffusion」：**两者表示同一件事，精度差 5%**。
+2. 主要误差来自**连续 round-trip 本身**（带正则的最小二乘反解，本就不是精确逆），不是量化。
+
+> 顺带解开了 `tokens_per_future_traj = 128` 的谜：**128 = 64 waypoints × 2（加速度, 曲率）**。
+> 历史则是 `48 = 16 位姿 × 3 (xyz)`。
 
 ---
 
