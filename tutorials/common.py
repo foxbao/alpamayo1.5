@@ -14,6 +14,7 @@ import math
 
 import torch
 import torch.nn as nn
+from transformers import ViTConfig, ViTModel
 
 N_WAYPOINTS = 64
 ACTION_DIM = 2
@@ -123,4 +124,62 @@ class Expert(nn.Module):
     def forward(self, x, cond):
         for b in self.blocks:
             x = b(x, cond)
+        return x
+
+
+# ---- 视觉编码（stage9）----
+def build_vit():
+    """一个真实的 ViT（transformers），小自定义配置匹配 toy 尺寸（16×16、灰度、patch4）。"""
+    cfg = ViTConfig(image_size=16, patch_size=4, num_channels=1,
+                    hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
+                    intermediate_size=128, num_labels=0)
+    return ViTModel(cfg)
+
+
+# ---- 历史编码（stage7/11/14）----
+class HistoryEncoder(nn.Module):
+    """历史轨迹 → tokens（简单投影，复杂处理交给 CosmosReason）。"""
+    def __init__(self, hidden=HIDDEN):
+        super().__init__()
+        self.proj = nn.Linear(2, hidden)
+
+    def forward(self, hist):
+        return self.proj(hist)   # (B, H, 2) -> (B, H, HIDDEN)
+
+
+# ---- 因果 transformer（stage13 的 Cosmos-Reason）----
+def make_causal_mask(L):
+    """因果 mask：位置 i 只能看 0..i（下三角=0，上三角=-inf）。"""
+    return torch.triu(torch.full((L, L), float("-inf")), diagonal=1)
+
+
+class CausalBlock(nn.Module):
+    def __init__(self, hidden=HIDDEN, n_heads=4):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(hidden, n_heads, batch_first=True)
+        self.n1 = nn.LayerNorm(hidden)
+        self.ffn = nn.Sequential(nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden))
+        self.n2 = nn.LayerNorm(hidden)
+
+    def forward(self, x, mask):
+        x = x + self.attn(x, x, x, attn_mask=mask)[0]
+        x = self.n1(x)
+        x = x + self.ffn(x)
+        x = self.n2(x)
+        return x
+
+
+class CosmosReason(nn.Module):
+    """迷你 Cosmos-Reason：因果 transformer，自回归生成推理。"""
+    def __init__(self, vocab_size, hidden=HIDDEN, n_blocks=3):
+        super().__init__()
+        self.text_embed = nn.Embedding(vocab_size, hidden)
+        self.blocks = nn.ModuleList([CausalBlock(hidden) for _ in range(n_blocks)])
+        self.head = nn.Linear(hidden, vocab_size)
+
+    def forward(self, input_embeds, text_ids, mask):
+        text = self.text_embed(text_ids)              # (B, L, H)
+        x = torch.cat([input_embeds, text], dim=1)    # (B, N+L, H)
+        for blk in self.blocks:
+            x = blk(x, mask)
         return x

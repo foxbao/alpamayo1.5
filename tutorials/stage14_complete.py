@@ -9,11 +9,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import ViTConfig, ViTModel
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit, make_causal_mask, CausalBlock, CosmosReason, HistoryEncoder,
 )
 
 KAPPA = 0.1
@@ -58,65 +58,12 @@ IMAGES = torch.stack([make_image(0), make_image(1), make_image(2)])        # (3,
 HISTORIES = torch.stack([make_history(0), make_history(1), make_history(2)])  # (3,HIST_LEN,2)
 
 
-def build_vit():
-    cfg = ViTConfig(image_size=16, patch_size=4, num_channels=1,
-                    hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
-                    intermediate_size=128, num_labels=0)
-    return ViTModel(cfg)
-
-
-def make_causal_mask(L):
-    return torch.triu(torch.full((L, L), float("-inf")), diagonal=1)
-
-
-class HistoryEncoder(nn.Module):
-    """历史轨迹 → tokens（简单投影，复杂处理交给 CosmosReason）。"""
-    def __init__(self, hidden=HIDDEN):
-        super().__init__()
-        self.proj = nn.Linear(2, hidden)
-
-    def forward(self, hist):
-        return self.proj(hist)   # (B, HIST_LEN, 2) -> (B, HIST_LEN, HIDDEN)
-
-
-class CausalBlock(nn.Module):
-    def __init__(self, hidden=HIDDEN, n_heads=4):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(hidden, n_heads, batch_first=True)
-        self.n1 = nn.LayerNorm(hidden)
-        self.ffn = nn.Sequential(nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden))
-        self.n2 = nn.LayerNorm(hidden)
-
-    def forward(self, x, mask):
-        x = x + self.attn(x, x, x, attn_mask=mask)[0]
-        x = self.n1(x)
-        x = x + self.ffn(x)
-        x = self.n2(x)
-        return x
-
-
-class CosmosReason(nn.Module):
-    """因果 transformer：吃 [历史+视觉] 连续 token + 推理 token，自回归生成 CoC。"""
-    def __init__(self, vocab_size=VOCAB_SIZE, hidden=HIDDEN, n_blocks=3):
-        super().__init__()
-        self.text_embed = nn.Embedding(vocab_size, hidden)
-        self.blocks = nn.ModuleList([CausalBlock(hidden) for _ in range(n_blocks)])
-        self.head = nn.Linear(hidden, vocab_size)
-
-    def forward(self, input_embeds, text_ids, mask):
-        text = self.text_embed(text_ids)              # (B, L, H)
-        x = torch.cat([input_embeds, text], dim=1)    # (B, N+L, H)
-        for blk in self.blocks:
-            x = blk(x, mask)
-        return x
-
-
 class MiniVLA(nn.Module):
     def __init__(self):
         super().__init__()
         self.hist_enc = HistoryEncoder()
         self.vit = build_vit()
-        self.cosmos = CosmosReason()
+        self.cosmos = CosmosReason(VOCAB_SIZE)
         self.in_proj = ActionInProj()
         self.expert = Expert()
         self.out_proj = ActionOutProj()
@@ -143,10 +90,16 @@ class MiniVLA(nn.Module):
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)
             text_ids = torch.cat([text_ids, next_tok], dim=1)
 
-        L = input_embeds.shape[1] + text_ids.shape[1]
-        h = self.cosmos(input_embeds, text_ids, make_causal_mask(L))
-        self.condition = h[:, input_embeds.shape[1]:]        # 推理部分的隐状态
+        # 与训练保持一致：用「去掉 <bos> 和末尾 <eos>」的推理前缀算 condition
+        text_in = text_ids[:, :-1]                           # [<bos>, t1, t2]
+        self.condition = self._reasoning_hidden(input_embeds, text_in)   # (B, 2, 64)
         return text_ids
+
+    def _reasoning_hidden(self, input_embeds, text_in):
+        """给定 [<bos>, r1, r2, ...]，返回推理部分的隐状态（去掉 <bos> 位置）。"""
+        L = input_embeds.shape[1] + text_in.shape[1]
+        h = self.cosmos(input_embeds, text_in, make_causal_mask(L))
+        return h[:, input_embeds.shape[1] + 1 :]             # 去掉 <bos>
 
     def sample(self, hist, img):
         text_ids = self.generate(hist, img)
@@ -170,12 +123,12 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
         text_in = torch.cat([bos, reasoning[:, :-1]], dim=1)  # [bos, turn, left]
         L = input_embeds.shape[1] + text_in.shape[1]
         h = model.cosmos(input_embeds, text_in, make_causal_mask(L))
-        text_h = h[:, input_embeds.shape[1]:]
+        text_h = h[:, input_embeds.shape[1]:]                # 用于语言建模损失
         logits = model.cosmos.head(text_h)
         cot_loss = F.cross_entropy(logits.reshape(-1, VOCAB_SIZE), reasoning.reshape(-1))
 
-        # ② Expert：flow matching
-        model.condition = text_h
+        # ② Expert：condition = 推理前缀隐状态（去 <bos>），与推理时一致
+        model.condition = model._reasoning_hidden(input_embeds, text_in)   # (B,2,64)
         x1 = target_actions[mode]
         x0 = torch.randn(batch, N_WAYPOINTS, ACTION_DIM)
         t = torch.rand(batch)

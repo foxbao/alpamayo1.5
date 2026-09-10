@@ -3,11 +3,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import ViTConfig, ViTModel
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit,
 )
 
 KAPPA = 0.1
@@ -34,20 +34,13 @@ FRONT = torch.stack([make_image(0), make_image(1), make_image(2)])  # (3,1,16,16
 SIDE = FRONT.transpose(2, 3)   # 侧视 = 前视转 90°（同一信息，换个视角）
 
 
-def build_vit():
-    cfg = ViTConfig(image_size=16, patch_size=4, num_channels=1,
-                    hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
-                    intermediate_size=128, num_labels=0)
-    return ViTModel(cfg)
-
-
 # 相机文本标签：真实代码写 "Front camera" 这类短语，这里用两个词
 VOCAB = {"front": 0, "side": 1}
 CAMERA_LABELS = torch.tensor([[0], [1]])   # (2, 1)
 
 
-class TextEncoder(nn.Module):
-    """相机标签的文本编码器（词 → 向量，一个词就一个 token）。"""
+class CameraLabelEncoder(nn.Module):
+    """相机标签编码器（词 → 向量，一个词就一个 token）。"""
     def __init__(self, vocab_size=2, hidden=HIDDEN):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, hidden)
@@ -60,7 +53,7 @@ class MiniVLA(nn.Module):
     def __init__(self):
         super().__init__()
         self.vit = build_vit()             # 共享 ViT（两个相机用同一个）
-        self.text_enc = TextEncoder()      # 相机文本标签编码器
+        self.text_enc = CameraLabelEncoder()   # 相机标签编码器
         self.in_proj = ActionInProj()
         self.expert = Expert()
         self.out_proj = ActionOutProj()

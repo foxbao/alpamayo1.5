@@ -4,11 +4,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import ViTConfig, ViTModel
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit, HistoryEncoder,
 )
 
 KAPPA = 0.1
@@ -52,28 +52,13 @@ def make_history(mode):
 HISTORIES = torch.stack([make_history(0), make_history(1), make_history(2)])  # (3,8,2)
 
 
-# ---------- 三个编码器（都简化到最小，重点是融合）----------
-class HistoryEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.proj = nn.Linear(2, HIDDEN)
-    def forward(self, hist):
-        return self.proj(hist)   # (B,8,2) -> (B,8,64)
-
-
+# ---------- 三个编码器（HistoryEncoder / build_vit 已在 common.py，这里只需 TextEncoder）----------
 class TextEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed = nn.Embedding(VOCAB_SIZE, HIDDEN)
     def forward(self, tokens):
         return self.embed(tokens)   # (B,2) -> (B,2,64)
-
-
-def build_vit():
-    cfg = ViTConfig(image_size=16, patch_size=4, num_channels=1,
-                    hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
-                    intermediate_size=128, num_labels=0)
-    return ViTModel(cfg)
 
 
 # ---------- 融合 + MiniVLA ----------

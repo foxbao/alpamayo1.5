@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import ViTConfig, ViTModel
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit,
 )
 
 IMG_SIZE = 16
@@ -30,21 +30,6 @@ def make_image(mode):
 
 
 IMAGES = torch.stack([make_image(0), make_image(1), make_image(2)])  # (3,1,16,16)
-
-
-def build_vit():
-    """一个真实的 ViT（transformers），小自定义配置匹配 toy 尺寸。
-
-    patch_size=4 → 16×16 图切成 4×4 = 16 个 patch token；
-    hidden_size=64 → 和我们 HIDDEN 对齐；
-    num_labels=0 → 不要分类头，只要特征。
-    """
-    cfg = ViTConfig(
-        image_size=16, patch_size=4, num_channels=1,
-        hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
-        intermediate_size=128, num_labels=0,
-    )
-    return ViTModel(cfg)
 
 
 class MiniVLA(nn.Module):

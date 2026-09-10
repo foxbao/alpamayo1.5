@@ -1,4 +1,9 @@
-"""Stage 5: 组装完整 MiniVLA（整合 stage1~4），跑端到端闭环"""
+"""Stage 5: 组装完整 MiniVLA（整合 stage1~4），跑端到端闭环
+
+教学近似：Expert 用**显式 cross-attention** 读 condition；
+真实代码是把 VLM 的 **KV cache** 直接当 expert 的 past_key_values
+（效果等价，实现更省显存）。详见 README 的「Toy → Real 对照」。
+"""
 
 import math
 import torch

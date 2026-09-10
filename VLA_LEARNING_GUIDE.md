@@ -13,7 +13,7 @@
 
 | 模块 | 代码位置 | 角色 |
 |---|---|---|
-| **VLM 主干**（Vision+Language） | `models/base_model.py` 里的 `self.vlm`，实际是 Qwen3-VL-8B | 看图、读历史，写推理 |
+| **VLM 主干**（Vision+Language） | `models/base_model.py` 里的 `self.vlm`，release 用的是 **Cosmos-Reason2-8B**（NVIDIA 基于 Qwen3-VL 的模型） | 看图、读历史，写推理 |
 | **动作专家**（Action expert） | `models/alpamayo1_5.py` 里的 `self.expert` | 一个小型 text-only transformer，负责「去噪」动作 |
 | **动作空间 + 扩散** | `action_space/` + `diffusion/flow_matching.py` | 把「轨迹」参数化成连续动作，再用 flow matching 采样 |
 
@@ -34,7 +34,7 @@
   ↓    文本: "output the chain-of-thought reasoning... then output the future trajectory"
 
   ↓ 2) fuse_traj_tokens (base_model.py:172)
-  ↓    把历史轨迹编码成 16 个离散 token，替换掉占位符
+  ↓    把历史轨迹编码成 48 个离散 token（16 个位姿 × 3 维），替换掉占位符
 
   ↓ 3) VLM 自回归生成 (alpamayo1_5.py:289)
   ↓    生成 CoC 推理文本，直到吐出 <|traj_future_start|> 就停
@@ -80,7 +80,15 @@
 
 ## 3. VLM 主干：因果链推理（你熟悉的 LLM 部分）
 
-VLM 是 Qwen3-VL-8B-Instruct（`base_model.py:376` `_initialize_qwenvl3_vlm`）。它就是个标准的多模态 LLM，但做了两件「VLA 特化」的事：
+VLM 主干是个标准的多模态 LLM。**注意代码默认值与 release 配置不同**：
+
+| | 值 |
+|---|---|
+| **release 配置**（`Alpamayo-1.5-10B/config.json`） | `nvidia/Cosmos-Reason2-8B` |
+| 代码默认值（`base_model.py:211`） | `Qwen/Qwen3-VL-8B-Instruct` |
+| processor 来源（`helper.py:25`） | `Qwen/Qwen3-VL-2B-Instruct` |
+
+（Cosmos-Reason2 是 NVIDIA 在 Qwen3-VL 基础上做的版本，接口相同。）它做了两件「VLA 特化」的事：
 
 **3.1 加了轨迹专用 token**（`base_model.py:347`）
 - 加了 `traj_vocab_size=768` 个离散 token：`<i0>` ... `<i767>`。

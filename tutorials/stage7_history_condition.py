@@ -27,16 +27,23 @@ def make_history(mode, hist_len=HIST_LEN, v0=5.0, dt=DT):
 
 
 class ConditionEncoder(nn.Module):
-    """把历史轨迹序列编码成 condition（替代离散 Embedding）。"""
-    def __init__(self, hist_feats=HIST_FEATS, hidden=HIDDEN, n_heads=4, n_layers=2):
+    """把历史轨迹序列编码成 condition（替代离散 Embedding）。
+
+    注意：nn.TransformerEncoder 本身**不含**位置编码，必须自己加——
+    否则序列顺序对模型没有意义（「先左后右」和「先右后左」会长得一样）。
+    """
+    def __init__(self, hist_feats=HIST_FEATS, hidden=HIDDEN, n_heads=4, n_layers=2, max_len=64):
         super().__init__()
         self.proj = nn.Linear(hist_feats, hidden)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, hidden))   # ← 可学习位置编码
         layer = nn.TransformerEncoderLayer(d_model=hidden, nhead=n_heads, batch_first=True)
         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
 
     def forward(self, history):
         # history: (B, H, 2) -> condition: (B, H, HIDDEN)
-        return self.encoder(self.proj(history))
+        x = self.proj(history)
+        x = x + self.pos_embed[:, : x.shape[1]]      # 加上位置编码（真实里用 RoPE）
+        return self.encoder(x)
 
 
 class MiniVLA(nn.Module):

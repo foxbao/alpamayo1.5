@@ -1,3 +1,9 @@
+"""Stage 1: 动作空间 —— 动作 (加速度, 曲率) → 轨迹
+
+教学近似：toy 用固定初始速度 v0=5.0、欧拉积分、Python 循环；
+真实代码从历史轨迹估计 v0、用梯形积分 + cumsum 向量化，并额外输出旋转矩阵。
+"""
+
 import torch
 
 # ---- 超参数 ----
@@ -14,9 +20,6 @@ KAPPA_BOUND = 0.33   # 曲率上限 → 最小转弯半径约 3m
 
 class ActionSpace:
     """单轮车(unicycle)运动学模型。"""
-
-    def action_dims(self):
-        return (N_WAYPOINTS, ACTION_DIM)
 
     def action_to_traj(self, action, v0=5.0):
         """把动作积分成轨迹。

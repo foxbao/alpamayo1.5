@@ -1,4 +1,10 @@
-"""Stage 15: CFG —— 用分类器自由引导放大「左转」指令"""
+"""Stage 15: CFG —— 用分类器自由引导放大「左转」指令
+
+教学近似：toy 学了一个「可学习的空条件 embedding」来表示「无指令」。
+真实代码是**从输入序列里删掉 <|route_start|>...<|route_end|> 那一段**
+（nav_utils.remove_nav_text），再跑一遍 VLM 得到无条件的 KV cache。
+机制相同，构造方式不同。
+"""
 
 import torch
 import torch.nn as nn

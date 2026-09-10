@@ -2,8 +2,19 @@
 
 从零手写一个迷你 VLA（Vision-Language-Action），理解 Alpamayo 1.5 的核心机制。
 
+> ## ⚠️ 定位说明（重要）
+>
+> **本教程是 Alpamayo 1.5 的「概念化 MiniVLA」，不是一个可复现真实模型的实现。**
+> 每个 stage 用最小代码解释**一个**机制；最后（见 §六）再把 toy 模块映射回真实文件。
+>
+> 真实模型的规模是 toy 的**几个数量级**：真实 VLM 是 8B 参数、15 万词表、30+ 层；
+> toy 是几万参数、十几个词、2 层。两者**结构对应，规模不可比**。
+
 > 适合：熟悉 3D 检测 / BEV、有一定 LLM 基础、想系统理解 VLA 的读者。
 > 每个 stage 是一个可独立运行的 `.py`，从框架到训练逐步递进。
+> toy 代码**只支持 CPU、固定 batch 与固定 shape**，刻意不做工程化。
+>
+> **另见**：**训练教程**在 `alpamayo-recipes/tutorials/`（讲权重是怎么训出来的）。
 
 ---
 
@@ -67,7 +78,7 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 11 | `stage11_fusion.py` | 多模态融合（收官） | 历史+图片+文本 三路 token concat 成一个 condition |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 文本标签标识相机 + concat，多相机怎么融 |
 | 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成推理，隐状态当 condition（对齐真实 VLM） |
-| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason，最接近真实 Alpamayo 输入侧 |
+| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason（toy 里最完整的输入侧；仍与真实有差距，见 §九） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 引导权重 w 放大条件：`v=(1-w)·v_uncond + w·v_cond`，w>1 外推 |
 
 **演进脉络（每个 stage 相对上一个改了什么）：**
@@ -116,7 +127,9 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 
 ---
 
-## 六、与真实 Alpamayo 的对照
+## 六、Toy → Real 对照（与真实 Alpamayo 的差距）
+
+> 本节是本教程的「免责声明 + 地图」：toy 是**教学近似**，这里逐项列出它和真实 release 的差距。
 
 | Toy 模块 | 真实模块 | 真实文件 |
 |---|---|---|
@@ -124,20 +137,51 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | FlowMatching | `FlowMatching` | `diffusion/flow_matching.py` |
 | ActionInProj/OutProj | `PerWaypointActionInProjV2` / out_proj | `models/action_in_proj.py` |
 | Expert | `self.expert`（Qwen3 text transformer，无 embed_tokens） | `models/alpamayo1_5.py` |
-| ViT / CosmosReason（因果 transformer，自回归生成 CoC） | `self.vlm`（Qwen3-VL：ViT + LLM，看图自回归生成 CoC） | `models/base_model.py` |
+| ViT / CosmosReason（因果 transformer，自回归生成 CoC） | `self.vlm`（release 用 Cosmos-Reason2：ViT + LLM，看图自回归生成 CoC） | `models/base_model.py` |
 | MiniVLA.sample | `sample_trajectories_from_data_with_vlm_rollout` | `models/alpamayo1_5.py:218` |
 
-**toy 和真实的差距**：toy 用循环积分（真实用 cumsum 向量化 + 梯形积分）；toy 的 ViT/CosmosReason/Expert 都是小尺寸、随机初始化（真实是大的预训练模型）；toy 的导航指令是合成 embedding（真实是自然语言 nav 指令）。CFG 已实现（stage15）。
+### 逐项差距清单
 
-**关于「一个模型 vs 多个模块」**：真实代码里只有一个大模型 `self.vlm`（Qwen3-VL-8B），它**内部**包含三部分，对应 toy 的三个模块：
+真实值来自 `Alpamayo-1.5-10B/config.json` 与对应源码。
 
-| Qwen3-VL 内部 | 干什么 | 对应 toy |
+| 方面 | toy | 真实 release | 性质 |
+|---|---|---|---|
+| VLM | 2~3 层、hidden 64、**随机初始化** | **Cosmos-Reason2-8B**（30+ 层、预训练） | 规模 |
+| 词表 | 7~15 个词 | ~15 万（BPE） | 规模 |
+| 历史轨迹 | 8~16 步序列 | **48 个 token**（16 位姿 × 3 维） | 表示 |
+| 未来轨迹 | 64 waypoints（动作空间 `(64,2)`） | `tokens_per_future_traj=128`、`traj_vocab_size=4000` | 表示 |
+| Expert hidden | 64 | **2048**（`expert_cfg.hidden_size`） | 规模 |
+| **条件机制** | **显式 cross-attention** `attn(x, cond, cond)` | **KV-cache prefix attention**（VLM 的 KV cache 直接接进 expert 的 `past_key_values`） | ⚠️ **结构差异** |
+| 条件长度 | 2~3 个 token | 数十~上百（CoC 文本 + 历史 + 路由） | 规模 |
+| 位置编码 | 可学习 `pos_embed` | **RoPE**（旋转位置编码，Qwen 系） | 实现差异 |
+| 动作积分 | 固定 `v0` + 欧拉 + Python 循环 | 从历史**估计 v0** + **梯形积分** + `cumsum` 向量化 + **输出旋转矩阵** | 精度/工程 |
+| **CFG** | 可学习的「空条件」embedding | **移除导航文本段**（route removal）构造无条件输入 | ⚠️ **结构差异** |
+| 图像输入 | 16×16 合成灰度图 | 1920×1080 RGB 多相机，`min/max_pixels` 约束 | 规模 |
+| 推理引擎 | 纯 PyTorch 循环 | HuggingFace + DeepSpeed/Hydra | 工程 |
+
+**哪些差距「不影响学概念」**：规模类（层数、hidden、词表）——结构一样，放大即可。
+**哪些是「结构性的，要知道不一样」**：上面标 ⚠️ 的两条（条件机制、CFG）。
+
+### 关键的两个「结构差异」（务必知道）
+
+**① 条件机制**：toy 用显式的第二个 attention（`cross_attn(query=动作, key/value=条件)`）；
+真实代码是把 VLM 的 **KV cache 对象**直接传给 expert 当 `past_key_values`（`alpamayo1_5.py:304,349`）。
+**效果等价**（都是让动作 token 注意到条件 token），但真实实现省掉了重复计算，也更省显存。
+
+**② CFG 的无条件分支**：toy 学了一个「空条件 embedding」来表示「无指令」；
+真实代码是**从输入序列里删掉 `<|route_start|>...<|route_end|>` 那一段**（`nav_utils.remove_nav_text`），
+再跑一遍 VLM 得到无条件 KV cache（`alpamayo1_5.py:519-575`）。**机制相同，构造方式不同。**
+
+**关于「一个模型 vs 多个模块」**：真实代码里只有一个大模型 `self.vlm`，它**内部**包含三部分，对应 toy 的三个模块。
+（release 配置里是 **Cosmos-Reason2-8B**；代码默认值是 `Qwen/Qwen3-VL-8B-Instruct`，两者接口相同。）
+
+| Cosmos-Reason2 内部 | 干什么 | 对应 toy |
 |---|---|---|
 | Vision Encoder（ViT） | 图 → visual tokens | `build_vit`（stage9） |
 | tokenizer + embed_tokens | 词 → 词向量 | `nn.Embedding`（即「Text Encoder」） |
 | LLM 的 transformer 层 | 自回归生成 CoC | `CausalBlock` 堆（即「Cosmos Reason Backbone」） |
 
-所以「Text Encoder」和「Cosmos Reason Backbone」**不是两个模型**，而是 Qwen3-VL 这一个模型内部的两部分；真正的第二个模型是 `self.expert`（Trajectory Decoder / 去噪器）。
+所以「Text Encoder」和「Cosmos Reason Backbone」**不是两个模型**，而是 Cosmos-Reason2 这一个模型内部的两部分；真正的第二个模型是 `self.expert`（Trajectory Decoder / 去噪器）。
 
 ---
 
@@ -155,10 +199,13 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 
 ## 八、读完 toy 之后
 
-16 个 stage 已经覆盖 VLA 的全部核心概念，是完整的教程主体。之后可做的两件事（都超出「学概念」范畴）：
+16 个 stage 覆盖了 VLA 的**主要机制**（动作空间、扩散采样、条件化、多模态融合、自回归生成、CFG）。
+但请注意：**这是概念化的 MiniVLA，不是对真实模型的复刻**——差距见 §六「Toy → Real 对照」。
+
+之后可做的两件事（都超出「学概念」范畴）：
 
 1. **读真实代码**：用 toy 当地图，逐行读 `alpamayo1_5.py` 的 `sample_trajectories_from_data_with_vlm_rollout`（对照上面「与真实 Alpamayo 的对照」表）。
-2. **换真大模型 + 真数据**：把 toy 的合成输入 / 小模型换成 Qwen3-VL + 真实驾驶数据——这是「工程化」，不是「学新概念」。
+2. **换真大模型 + 真数据**：把 toy 的合成输入 / 小模型换成 Cosmos-Reason2 + 真实驾驶数据——这是「工程化」，不是「学新概念」。
 
 ---
 

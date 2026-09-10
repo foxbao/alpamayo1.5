@@ -24,15 +24,21 @@ INSTRUCTIONS = torch.tensor([
 
 
 class TextEncoder(nn.Module):
-    """文本 token 序列 → condition。"""
-    def __init__(self, vocab_size=VOCAB_SIZE, hidden=HIDDEN, num_layers=2):
+    """文本 token 序列 → condition。
+
+    同样需要位置编码——否则「turn left」和「left turn」对模型完全一样。
+    """
+    def __init__(self, vocab_size=VOCAB_SIZE, hidden=HIDDEN, num_layers=2, max_len=16):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, hidden)          # token id → 词向量
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, hidden))   # ← 可学习位置编码
         layer = nn.TransformerEncoderLayer(d_model=hidden, nhead=4, batch_first=True)
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
 
     def forward(self, token_ids):
-        return self.encoder(self.embed(token_ids))   # (B, L) -> (B, L, HIDDEN)
+        x = self.embed(token_ids)
+        x = x + self.pos_embed[:, : x.shape[1]]      # 加上位置编码（真实里用 RoPE）
+        return self.encoder(x)                       # (B, L) -> (B, L, HIDDEN)
 
 
 class MiniVLA(nn.Module):
