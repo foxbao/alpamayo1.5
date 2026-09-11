@@ -119,7 +119,17 @@ class ExpertBlock(nn.Module):
 
 
 class Expert(nn.Module):
-    """去噪专家。
+    """去噪专家（**cross-attention 版** —— 注意：这不是 Alpamayo 的做法）。
+
+    ⚠️ 这里的 ExpertBlock 是「self-attn + cross-attn + FFN」，条件作为单独的
+       `cond` 张量传入。这是【通用的条件化做法】（Stable Diffusion、原始
+       Transformer decoder 都这样），**但 Alpamayo 的 Expert 没有 cross-attention**：
+       它和 VLM 文本塔结构完全相同，动作 token「续写」在 VLM 的逐层 K/V 后面。
+
+       两种做法的对比见 stage4_expert.py；真实做法的完整实现见 exp_prefix_expert.py；
+       为什么 toy 选了这一版见 README §六「两种设计哲学」。
+
+       下面这段位置编码说明同样适用于真实 Expert。
 
     注意：动作 token 需要【位置编码】——否则 64 个 waypoint 在 self-attention 里
     只是一个集合，第 5 个点分不清自己在第 10 个点前面。真实代码同样给 expert 传
