@@ -71,7 +71,7 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 1 | `stage1_action_space.py` | 单轮车运动学 | 动作 = (加速度, 曲率)，积分成轨迹；运动学约束不等于安全/舒适保证 |
 | 2 | `stage2_flow_matching.py` | 向量场采样直觉 | 在已知的 `target - x` oracle 收缩场上做欧拉积分；真正的 flow matching 训练见 stage6 |
 | 3 | `stage3_projections.py` | Fourier 编码 | 动作/时间编码成 embedding，进 transformer 的「桥」 |
-| 4 | `stage4_expert.py` | cross-attention | 动作当 query 去「查」条件，VLA 的灵魂 |
+| 4 | `stage4_expert.py` | **条件化的两种做法** | ① cross-attention（通用做法）② **prefix 续写（Alpamayo 真实做法）**——动作 token 接在 VLM 的逐层 K/V 后面，Expert 无 cross-attn |
 | 5 | `stage5_assembly.py` | 组装 | 把 1~4 拼成完整 MiniVLA，跑通闭环 |
 | 6 | `stage6_training.py` | flow matching 训练 | 预测向量场 v = x1 - x0，离散 condition 控制轨迹 |
 | 7 | `stage7_history_condition.py` | 序列编码条件 | condition 从历史轨迹「读」出来，逼近真实 VLM |
