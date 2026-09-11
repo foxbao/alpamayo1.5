@@ -34,7 +34,7 @@ N_COND = 3               # 三个条件
 KAPPA = 0.05
 
 
-class Block(nn.Module):
+class CacheBlock(nn.Module):
     """因果 transformer block（支持 KV cache）。VLM 和 Expert 共用同一种 block。"""
 
     def __init__(self, d=D, n_heads=4):
@@ -72,12 +72,12 @@ class Block(nn.Module):
         return x, new_cache
 
 
-class Stack(nn.Module):
-    """N 层 Block 叠起来。VLM 和 Expert 都用它。"""
+class CacheStack(nn.Module):
+    """N 层 CacheBlock 叠起来。VLM 和 Expert 都用它。"""
 
     def __init__(self, d=D, n_layers=N_LAYERS):
         super().__init__()
-        self.blocks = nn.ModuleList([Block(d) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([CacheBlock(d) for _ in range(n_layers)])
 
     def forward(self, x, caches=None, causal=True):
         new_caches = []
@@ -87,7 +87,7 @@ class Stack(nn.Module):
         return x, new_caches
 
 
-class PrefixVLA(nn.Module):
+class PrefixMiniVLA(nn.Module):
     """prefix 版：VLM 编码前缀 → 产 cache；Expert 接在后面算动作。"""
 
     def __init__(self):
@@ -95,9 +95,9 @@ class PrefixVLA(nn.Module):
         # VLM：把"条件"编码成前缀（真实里是 图+历史+文本 → token）
         self.cond_embed = nn.Embedding(N_COND, D)
         self.prefix_pos = nn.Parameter(torch.zeros(1, PREFIX_LEN, D))
-        self.vlm = Stack()
-        # Expert：**同一种 Block、同样的层数** —— 所以能接 VLM 的 cache
-        self.expert = Stack()
+        self.vlm = CacheStack()
+        # Expert：**同一种 CacheBlock、同样的层数** —— 所以能接 VLM 的 cache
+        self.expert = CacheStack()
         # 动作 token 的投影（toy 里是 ActionInProj，这里简化）
         self.action_in = nn.Linear(ACTION_DIM, D)
         self.out_proj = nn.Linear(D, ACTION_DIM)
@@ -149,13 +149,13 @@ if __name__ == "__main__":
     target[2, :, 1] = 0.0
 
     print("=" * 70)
-    print("结构：VLM 与 Expert 必须【同一种 Block、同层数】才能共用 cache")
+    print("结构：VLM 与 Expert 必须【同一种 CacheBlock、同层数】才能共用 cache")
     print("=" * 70)
-    print(f"  VLM:    {N_LAYERS} 层 Block   （条件 → 前缀 → 产 cache）")
-    print(f"  Expert: {N_LAYERS} 层 Block   （动作 token 接在前缀后面）")
+    print(f"  VLM:    {N_LAYERS} 层 CacheBlock   （条件 → 前缀 → 产 cache）")
+    print(f"  Expert: {N_LAYERS} 层 CacheBlock   （动作 token 接在前缀后面）")
     print(f"  前缀长度 = {PREFIX_LEN}（真实里是几千）\n")
 
-    model = PrefixVLA()
+    model = PrefixMiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=3e-3)
     train(model, opt, target, fm)
 
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     print("=" * 70)
     with torch.no_grad():
         _, caches = model.vlm(model.build_prefix(torch.tensor([0])))
-    print(f"  层数 = {len(caches)}（= Block 的个数）")
+    print(f"  层数 = {len(caches)}（= CacheBlock 的个数）")
     for i, (k, v) in enumerate(caches):
         print(f"  layer {i}:  K{tuple(k.shape)}  V{tuple(v.shape)}   "
               f"（B, heads, 前缀长度, head_dim）")

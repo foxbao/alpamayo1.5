@@ -80,7 +80,7 @@ class CrossAttnExpert(nn.Module):
 # 做法 ②：prefix 续写（Alpamayo 的真实做法）
 # ═══════════════════════════════════════════════════════════════
 
-class Block(nn.Module):
+class CacheBlock(nn.Module):
     """因果 transformer block，**支持 KV cache**。
 
     注意它和 ① 的 ExpertBlockCrossAttn 的区别：**没有 cross_attn**。
@@ -129,7 +129,7 @@ class PrefixVLM(nn.Module):
         super().__init__()
         self.embed = nn.Linear(hidden, hidden)      # 假装把条件投影成前缀 token
         self.pos = nn.Parameter(torch.zeros(1, PREFIX_LEN, hidden))
-        self.blocks = nn.ModuleList([Block(hidden) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([CacheBlock(hidden) for _ in range(n_layers)])
 
     def forward(self, condition_vec):
         # condition_vec: (B, H) —— 简化的「条件」；这里直接扩成 PREFIX_LEN 个 token
@@ -146,7 +146,7 @@ class PrefixExpert(nn.Module):
 
     def __init__(self, hidden=HIDDEN, n_layers=2):
         super().__init__()
-        self.blocks = nn.ModuleList([Block(hidden) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([CacheBlock(hidden) for _ in range(n_layers)])
 
     def forward(self, x, caches):
         for i, blk in enumerate(self.blocks):
