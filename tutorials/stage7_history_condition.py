@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +5,7 @@ import torch.nn.functional as F
 # 复用 stage6 的零件（ActionSpace/FlowMatching/投影/Expert 全都不变）
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
-    N_WAYPOINTS, ACTION_DIM, HIDDEN, N_STEPS, DT,
+    N_WAYPOINTS, ACTION_DIM, HIDDEN, DT,
 )
 
 HIST_LEN = 16      # 历史步数
@@ -64,12 +63,13 @@ class MiniVLA(nn.Module):
 
     def sample(self, history):
         self.condition = self.cond_enc(history)
-        action = self.fm.sample(self.step_fn, batch_size=history.shape[0], temperature=0.3)
+        action = self.fm.sample(self.step_fn, batch_size=history.shape[0], temperature=1.0)
         return self.action_space.action_to_traj(action)
 
 
 
 def train(model, opt, target_actions, n_iters=8000, batch=32):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))               # 随机模式
         hist = make_history(mode)                          # (B,H,2) 生成历史轨迹
@@ -87,6 +87,7 @@ def train(model, opt, target_actions, n_iters=8000, batch=32):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = 0.05
     target[1, :, 1] = -0.05
@@ -95,6 +96,7 @@ if __name__ == "__main__":
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：给一段历史轨迹，模型自己推断未来方向")
     with torch.no_grad():

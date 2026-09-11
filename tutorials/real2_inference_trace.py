@@ -10,8 +10,8 @@
   models/base_model.py:172   fuse_traj_tokens
   models/alpamayo1_5.py:307  _find_eos_offset
 
-运行（注意避开被 NoMachine 占用的 GPU 0）：
-  CUDA_VISIBLE_DEVICES=1 python tutorials/real2_inference_trace.py
+运行：python tutorials/real2_inference_trace.py
+按机器实际可用 GPU 设置 CUDA_VISIBLE_DEVICES，参见 RUN_NOTES.md。
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ if __name__ == "__main__":
     sec("① 加载模型（10B，来自本地 HF 缓存）")
     model = Alpamayo1_5.from_pretrained(
         "nvidia/Alpamayo-1.5-10B", dtype=torch.bfloat16, attn_implementation="sdpa"
-    ).to("cuda")
+    ).to("cuda").eval()
     processor = helper.get_processor(model.tokenizer)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  参数量 = {n_params/1e9:.2f} B")
@@ -106,7 +106,7 @@ if __name__ == "__main__":
     model._find_eos_offset = staticmethod(logged_find)
 
     torch.cuda.manual_seed_all(42)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
             data=model_inputs,
             top_p=0.98,

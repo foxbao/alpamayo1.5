@@ -9,7 +9,6 @@
 纯 CPU，不需要加载 10B 模型。
 """
 
-import numpy as np
 import torch
 
 from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
@@ -30,21 +29,16 @@ def _load_amayo_tokenizer():
       1) 先加 traj_vocab_size 个离散轨迹 token <i0>..<i3999>   ← 漏了这步 id 会差 4000
       2) 再加 SPECIAL_TOKENS（add_special_tokens=True 时）
     """
-    import glob
     import json
 
+    from huggingface_hub import hf_hub_download
     from transformers import AutoProcessor
     from alpamayo1_5.models.base_model import SPECIAL_TOKENS, TRAJ_TOKEN
 
     # 从 release 的 config.json 读 traj_vocab_size，保证和真实一致
-    cfg_path = glob.glob(
-        "~/.cache/huggingface/hub/models--nvidia--Alpamayo-1.5-10B/snapshots/*/config.json"
-    )
-    import os
-    traj_vocab_size = 4000
-    if cfg_path:
-        with open(os.path.expanduser(cfg_path[0])) as f:
-            traj_vocab_size = json.load(f).get("traj_vocab_size", 4000)
+    cfg_path = hf_hub_download("nvidia/Alpamayo-1.5-10B", "config.json")
+    with open(cfg_path) as f:
+        traj_vocab_size = json.load(f)["traj_vocab_size"]
 
     proc = AutoProcessor.from_pretrained(
         "Qwen/Qwen3-VL-2B-Instruct", min_pixels=163840, max_pixels=196608

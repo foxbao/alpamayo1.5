@@ -1,4 +1,14 @@
-"""Stage 10: 补 Language —— 文本指令 → condition"""
+"""Stage 10: 补 Language —— 文本指令 → condition
+
+⚠️ 注意：这里的文本是【输入指令】（外部给定的），不是模型生成的推理。
+   真实 Alpamayo 的导航指令长这样（见 notebooks/nav_demo_samples.json）：
+       "Turn left in 11m" / "Turn right in 30m" / "Turn left in 4m"
+   本 stage 简化为同样的「动作 + 距离」模式，用词刻意和 stage13 的【生成推理】
+   （shift/left/due/to/curve...）区分开。
+
+   真实里两者角色不同：
+       导航指令（输入）→ 影响推理怎么写；CoC 推理（输出）→ 隐状态影响轨迹怎么出
+"""
 
 import torch
 import torch.nn as nn
@@ -12,15 +22,17 @@ from common import (
 KAPPA = 0.1
 
 # 迷你词表：把"词"映射成 token id（真实里是 tokenizer 干的，这里手写个小的）
-VOCAB = {"turn": 0, "left": 1, "right": 2, "continue": 3, "straight": 4}
+# 模仿真实导航指令 "Turn left in 11m" 的「动作 + 距离」格式
+VOCAB = {"turn": 0, "left": 1, "right": 2, "keep": 3, "straight": 4,
+         "in": 5, "10m": 6, "30m": 7}
 VOCAB_SIZE = len(VOCAB)
 
 # 三条指令 → token id 序列
 INSTRUCTIONS = torch.tensor([
-    [0, 1],   # "turn left"
-    [0, 2],   # "turn right"
-    [3, 4],   # "continue straight"
-])   # (3, 2)
+    [0, 1, 5, 6],   # "turn left in 10m"      （真实例："Turn left in 11m"）
+    [0, 2, 5, 7],   # "turn right in 30m"     （真实例："Turn right in 30m"）
+    [3, 4, 5, 7],   # "keep straight in 30m"
+])   # (3, 4)
 
 
 class TextEncoder(nn.Module):
@@ -64,6 +76,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, target_actions, n_iters=5000, batch=64):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         tokens = INSTRUCTIONS[mode]               # (B, 2)
@@ -81,6 +94,7 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = KAPPA     # left
     target[1, :, 1] = -KAPPA    # right
@@ -89,9 +103,10 @@ if __name__ == "__main__":
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：给文本指令，模型输出轨迹")
-    names = ["turn left", "turn right", "continue straight"]
+    names = ["turn left in 10m", "turn right in 30m", "keep straight in 30m"]
     with torch.no_grad():
         for i, name in enumerate(names):
             tokens = INSTRUCTIONS[i:i + 1]       # (1, 2)

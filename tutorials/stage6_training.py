@@ -47,6 +47,7 @@ class MiniVLA(nn.Module):
 
 # ---- 训练 ----
 def train(model, opt, target_actions, n_iters=3000, batch=32):
+    model.train()
     for it in range(n_iters):
         idx = torch.randint(0, target_actions.shape[0], (batch,))   # 随机指令
         model.condition = model.cond_gen(idx)                        # (B,L,H)
@@ -63,6 +64,7 @@ def train(model, opt, target_actions, n_iters=3000, batch=32):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     # 三个指令的目标动作（恒定曲率）
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = 0.05    # "left"   -> 正曲率（左转）
@@ -72,6 +74,7 @@ if __name__ == "__main__":
     model = MiniVLA(3)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后采样（看终点 y 的符号）：")
     with torch.no_grad():

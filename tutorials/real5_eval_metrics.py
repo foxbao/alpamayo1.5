@@ -2,22 +2,20 @@
 
 用真实的模型 + 真实数据，算一整套指标：
   ① 精度：ADE / FDE / 终点误差 / 航向误差
-  ② 舒适性：加速度 / 曲率 / jerk 的超限比例（用真实动作空间算）
+  ② 运动学代理指标：反解的加速度 / 曲率 / jerk 统计，不代表完整舒适性评估
   ③ 多样性：多次采样的差异（可选，需要更多显存）
 
-对应真实代码：
-  metrics/distance_metrics.py  DistanceMetrics
-  metrics/metric_api.py        ReasoningSampler
-运行：CUDA_VISIBLE_DEVICES=1 python tutorials/real5_eval_metrics.py
+对应真实代码：action_space/unicycle_accel_curvature.py；位移指标在本脚本中计算。
+运行：N_SAMPLES=1 python tutorials/real5_eval_metrics.py（按机器选择可用 GPU）
 """
 
 import json
-import glob
 import os
 
 import numpy as np
 import torch
 import hydra.utils as hyu
+from huggingface_hub import hf_hub_download
 
 from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
@@ -34,10 +32,8 @@ def sec(t):
 
 
 def load_cfg():
-    p = os.path.expanduser(
-        "~/.cache/huggingface/hub/models--nvidia--Alpamayo-1.5-10B/snapshots/*/config.json"
-    )
-    with open(glob.glob(p)[0]) as f:
+    path = hf_hub_download("nvidia/Alpamayo-1.5-10B", "config.json")
+    with open(path) as f:
         return json.load(f)
 
 
@@ -45,14 +41,38 @@ def wrap_pi(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
 
+def pairwise_trajectory_distances(pred_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return per-timestep and endpoint distances for every unordered sample pair.
+
+    Args:
+        pred_xy: Predicted trajectories with shape ``(K, T, 2)``.
+
+    Returns:
+        Per-timestep distances with shape ``(K * (K - 1) / 2, T)`` and
+        the corresponding endpoint distances with shape ``(K * (K - 1) / 2,)``.
+    """
+    if pred_xy.ndim != 3 or pred_xy.shape[-1] != 2 or pred_xy.shape[1] == 0:
+        raise ValueError("pred_xy must have shape (K, T, 2) with T > 0")
+
+    pairs = [
+        np.linalg.norm(pred_xy[i] - pred_xy[j], axis=-1)
+        for i in range(pred_xy.shape[0])
+        for j in range(i + 1, pred_xy.shape[0])
+    ]
+    pairwise = np.asarray(pairs).reshape(-1, pred_xy.shape[1])
+    return pairwise, pairwise[:, -1]
+
+
 def main():
+    if N_SAMPLES < 1:
+        raise ValueError("N_SAMPLES must be positive")
     cfg = load_cfg()
     action_space = hyu.instantiate(cfg["action_space_cfg"])
 
     sec("① 加载模型 + 数据 + 推理")
     model = Alpamayo1_5.from_pretrained(
         "nvidia/Alpamayo-1.5-10B", dtype=torch.bfloat16, attn_implementation="sdpa"
-    ).to("cuda")
+    ).to("cuda").eval()
     processor = helper.get_processor(model.tokenizer)
 
     data = load_physical_aiavdataset(CLIP_ID, t0_us=T0_US)
@@ -73,7 +93,7 @@ def main():
     )
 
     torch.cuda.manual_seed_all(42)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
             data=model_inputs,
             top_p=0.98,
@@ -115,7 +135,8 @@ def main():
     print(f"  航向误差: mean={np.degrees(yaw_err.mean()):.2f}°  max={np.degrees(yaw_err.max()):.2f}°")
 
     # ---------------- ③ 舒适性指标 ----------------
-    sec("③ 舒适性指标（用真实动作空间算）")
+    sec("③ 运动学代理指标（用真实动作空间反解）")
+    print("  反解包含平滑和曲率裁剪；下列统计不是原始控制量，也不是舒适性认证。")
     hist_xyz = data["ego_history_xyz"].squeeze(0)
     hist_rot = data["ego_history_rot"].squeeze(0)
 
@@ -128,35 +149,35 @@ def main():
         jerk = np.diff(accel) / action_space.dt
         print(f"\n  [{name}]")
         print(f"    加速度  mean={np.abs(accel).mean():.3f}  max={np.abs(accel).max():.3f} m/s²"
-              f"   (界限 ±9.8)")
+              f"   (动作空间边界 {action_space.accel_bounds})")
         print(f"    曲率    mean={np.abs(curv).mean():.5f} max={np.abs(curv).max():.5f} 1/m"
-              f"  (界限 ±0.33)")
+              f"  (反解裁剪边界 {action_space.curvature_bounds})")
         print(f"    jerk    mean={np.abs(jerk).mean():.3f}  max={np.abs(jerk).max():.3f} m/s³")
         return accel, curv, jerk
 
-    acc_p, cur_p, jerk_p = comfort(pred[best], pred_r[best], "模型预测（最优样本）")
+    for k in range(pred.shape[0]):
+        comfort(pred[k], pred_r[k], f"模型预测（样本 {k}）")
     comfort(gt_xyz, gt_rot, "真值")
 
     # ---------------- ④ 多样性 ----------------
     if pred.shape[0] > 1:
         sec("④ 多样性（多采样之间的差异）")
-        pair = []
-        for i in range(pred.shape[0]):
-            for j in range(i + 1, pred.shape[0]):
-                pair.append(np.linalg.norm(pred[i][:, :2] - pred[j][:, :2], axis=-1))
-        pair = np.array(pair)
+        pair, endpoint_pairwise = pairwise_trajectory_distances(pred[:, :, :2])
         print(f"  {pred.shape[0]} 条轨迹，{len(pair)} 对")
-        print(f"  两两平均距离: mean={pair.mean():.3f}  max={pair.max():.3f} m")
-        print(f"  终点两两距离: mean={np.linalg.norm(pred[:, -1, :2] - pred[:, -1, :2].mean(0), axis=-1).mean():.3f} m")
-        print(f"\n  → 多样性越大 = 模型表达了越多的可能性（但太大会显得不确定）")
+        pair_means = pair.mean(axis=1)
+        print(f"  两两平均轨迹距离: mean={pair_means.mean():.3f}  max={pair_means.max():.3f} m")
+        print(
+            f"  终点两两距离: mean={endpoint_pairwise.mean():.3f} "
+            f"max={endpoint_pairwise.max():.3f} m"
+        )
+        print("\n  → 距离只描述样本离散程度，不证明不同轨迹合理或概率校准良好。")
 
         sec("⑤ 关键对比：只看 minADE 会骗人")
         print(f"  minADE = {ades.min():.3f} m   ← 只看这个，模型「很好」")
-        print(f"  但 {pred.shape[0]} 条采样里：最好的 {ades.min():.3f}，最差的 {ades.max():.3f}"
-              f"（相差 {ades.max()/ades.min():.1f} 倍）")
+        print(f"  但 {pred.shape[0]} 条采样里：最好的 {ades.min():.3f}，最差的 {ades.max():.3f}")
         print(f"  离散程度（ADE 标准差）= {ades.std():.3f} m")
-        print(f"\n  → minADE 只反映「最幸运的一次」；")
-        print(f"    真实部署要看：分布的均值/方差、是否覆盖真值、以及舒适性")
+        print("\n  → minADE 只反映「最幸运的一次」；")
+        print("    真实部署要看：分布的均值/方差、是否覆盖真值、以及舒适性")
 
 
 if __name__ == "__main__":

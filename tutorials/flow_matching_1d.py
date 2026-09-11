@@ -1,4 +1,4 @@
-"""Flow Matching 最小例子：1D 双峰 {-1,+1}（和 stage9 DDPM 对照）"""
+"""Flow Matching 最小例子：1D 双峰 {-1,+1}（和 ddpm_1d.py 对照）。"""
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ class VectorField(nn.Module):
 
 
 def train(net, opt, n_iters=5000, batch=128):
+    net.train()
     for it in range(n_iters):
         x1 = torch.randint(0, 2, (batch, 1)).float() * 2 - 1   # 数据 ±1
         x0 = torch.randn(batch, 1)                              # 噪声
@@ -43,9 +44,11 @@ def sample(net, n=1000, n_steps=50):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     net = VectorField()
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
     train(net, opt)
+    net.eval()
 
     out = sample(net)
     n_neg = (out < -0.5).sum().item()

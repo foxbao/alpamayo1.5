@@ -1,4 +1,8 @@
-"""Stage 12: 双相机 —— 共享 ViT + 文本标签标识相机 + concat"""
+"""Stage 12: 双相机：共享 ViT，先融合每路标签与图片，再拼接条件。
+
+裸 concat 后直接做 cross-attention 无法把相邻标签和图片绑定；这里用共享的
+小型 transformer 在每路相机内建立联系。真实 VLM 在更长的完整序列上融合。
+"""
 
 import torch
 import torch.nn as nn
@@ -31,7 +35,12 @@ def make_image(mode):
 
 
 FRONT = torch.stack([make_image(0), make_image(1), make_image(2)])  # (3,1,16,16)
-SIDE = FRONT.transpose(2, 3)   # 侧视 = 前视转 90°（同一信息，换个视角）
+# 第二个相机的输入：把同一场景旋转 90°。
+# ⚠️ 这仍是【合成】的，不是真实相机标定投影（toy 用 16×16 假图，做不了真投影）。
+#    真实的多相机处理见 real1（16 张真实图 + 相机文字标签）和 real6（相机消融）。
+#    这里用「旋转」而非「转置」：转置是镜像、翻转手性，物理上拍不出来；
+#    旋转至少对应「相机装成另一个角度」。
+SIDE = torch.rot90(FRONT, k=1, dims=(-2, -1))
 
 
 # 相机文本标签：真实代码写 "Front camera" 这类短语，这里用两个词
@@ -54,6 +63,12 @@ class MiniVLA(nn.Module):
         super().__init__()
         self.vit = build_vit()             # 共享 ViT（两个相机用同一个）
         self.text_enc = CameraLabelEncoder()   # 相机标签编码器
+        self.pos_embed = nn.Parameter(torch.empty(1, 18, HIDDEN))
+        nn.init.normal_(self.pos_embed, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            HIDDEN, 4, dim_feedforward=HIDDEN * 2, dropout=0.0, batch_first=True
+        )
+        self.camera_fusion = nn.TransformerEncoder(layer, num_layers=1)
         self.in_proj = ActionInProj()
         self.expert = Expert()
         self.out_proj = ActionOutProj()
@@ -72,6 +87,9 @@ class MiniVLA(nn.Module):
 
         f = torch.cat([front_label, f], dim=1)   # (B,18,64) = [front] + 17 视觉
         s = torch.cat([side_label, s], dim=1)    # (B,18,64) = [side]  + 17 视觉
+        # 图片 token 在进入 Expert 前就读到了本路标签，不能省掉这一步。
+        f = self.camera_fusion(f + self.pos_embed)
+        s = self.camera_fusion(s + self.pos_embed)
         return torch.cat([f, s], dim=1)          # (B,36,64)
 
     def step_fn(self, x, t):
@@ -86,6 +104,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, target_actions, n_iters=5000, batch=64):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         model.condition = model.encode(FRONT[mode], SIDE[mode])   # (B,36,64)
@@ -102,6 +121,7 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = KAPPA
     target[1, :, 1] = -KAPPA
@@ -110,6 +130,7 @@ if __name__ == "__main__":
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：两张图（前视+侧视）+ 文本标签一起给")
     names = ["left", "right", "straight"]

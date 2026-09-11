@@ -1,4 +1,4 @@
-"""Stage 11: 融合 —— 历史 + 图片 + 文本 → 一个 condition（收官）"""
+"""Stage 11: 融合 —— 历史 + 图片 + 文本 → 一个 condition"""
 
 import math
 import torch
@@ -68,6 +68,8 @@ class MiniVLA(nn.Module):
         self.hist_enc = HistoryEncoder()
         self.vis_enc = build_vit()
         self.text_enc = TextEncoder()
+        self.pos_embed = nn.Parameter(torch.empty(1, HIST_LEN + 17 + 2, HIDDEN))
+        nn.init.normal_(self.pos_embed, std=0.02)
         self.in_proj = ActionInProj()
         self.expert = Expert()
         self.out_proj = ActionOutProj()
@@ -79,7 +81,8 @@ class MiniVLA(nn.Module):
         h = self.hist_enc(hist)                    # (B, 8,  64)
         v = self.vis_enc(img).last_hidden_state    # (B, 17, 64)
         t = self.text_enc(text)                    # (B, 2,  64)
-        return torch.cat([h, v, t], dim=1)         # (B, 27, 64) ← 融合 = concat
+        # 固定槽位区分模态，并保留历史/文本顺序；裸 concat 不携带位置信息。
+        return torch.cat([h, v, t], dim=1) + self.pos_embed  # (B, 27, 64)
 
     def step_fn(self, x, t):
         emb = self.in_proj(x, t)
@@ -93,6 +96,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, target_actions, n_iters=5000, batch=64):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         hist = HISTORIES[mode]
@@ -112,6 +116,7 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = KAPPA
     target[1, :, 1] = -KAPPA
@@ -120,6 +125,7 @@ if __name__ == "__main__":
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：三路输入一起给，模型输出轨迹")
     names = ["left", "right", "straight"]

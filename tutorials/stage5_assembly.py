@@ -2,7 +2,7 @@
 
 教学近似：Expert 用**显式 cross-attention** 读 condition；
 真实代码是把 VLM 的 **KV cache** 直接当 expert 的 past_key_values
-（效果等价，实现更省显存）。详见 README 的「Toy → Real 对照」。
+两者都实现条件化，但 attention 结构不等价。详见 README 的「Toy → Real 对照」。
 """
 
 import math

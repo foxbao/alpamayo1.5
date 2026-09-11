@@ -33,6 +33,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, n_iters=5000, batch=64):
+    model.train()
     left = torch.zeros(N_WAYPOINTS, ACTION_DIM); left[:, 1] = KAPPA
     right = torch.zeros(N_WAYPOINTS, ACTION_DIM); right[:, 1] = -KAPPA
     targets = torch.stack([left, right], 0)   # (2, N, 2)
@@ -53,9 +54,11 @@ def train(model, opt, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt)
+    model.eval()
 
     print("\n采样 20 次，看动作曲率 κ 的分布：")
     with torch.no_grad():
@@ -69,5 +72,5 @@ if __name__ == "__main__":
         n_mid = 20 - n_left - n_right
         print(f"\n左转(κ>+0.05): {n_left}  右转(κ<-0.05): {n_right}  中间: {n_mid}")
         print(f"平均 κ = {kappas.mean():+.4f}")
-        print("（左转右转都有、中间≈0 = 学会了多模态分布）")
-        print("（若只做回归，输出会是平均 κ≈0 的'直行'——没人要的轨迹）")
+        print("（这是按平均曲率做的粗略分组，还需检查逐时刻动作是否接近目标。）")
+        print("（同一条件的单输出 MSE 动作回归会拟合 κ≈0，不表达本例左右两个模式。）")

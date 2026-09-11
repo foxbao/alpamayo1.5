@@ -13,12 +13,9 @@
 """
 
 import json
-import glob
-import os
-
-import numpy as np
 import torch
 import hydra.utils as hyu
+from huggingface_hub import hf_hub_download
 
 from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 
@@ -31,10 +28,9 @@ def sec(t):
 
 
 def load_cfg():
-    pattern = os.path.expanduser(
-        "~/.cache/huggingface/hub/models--nvidia--Alpamayo-1.5-10B/snapshots/*/config.json"
-    )
-    with open(glob.glob(pattern)[0]) as f:
+    # 使用 HF 的缓存解析，兼容 HF_HOME；缺失时只下载配置，不下载权重。
+    path = hf_hub_download("nvidia/Alpamayo-1.5-10B", "config.json")
+    with open(path) as f:
         return json.load(f)
 
 
@@ -59,10 +55,13 @@ if __name__ == "__main__":
           f"{action_space.n_waypoints * 2}")
 
     # 量化分辨率（归一化单位 → 物理单位）
-    res_norm = (tokenizer.dims_max[0] - tokenizer.dims_min[0]) / (tokenizer.num_bins - 1)
-    print(f"\n  量化分辨率（归一化）: {res_norm:.6f}")
-    print(f"    → 加速度:  {res_norm * action_space.accel_std.item():.6f} m/s²")
-    print(f"    → 曲率:    {res_norm * action_space.curvature_std.item():.8f} 1/m")
+    resolutions = [
+        (hi - lo) / (tokenizer.num_bins - 1)
+        for lo, hi in zip(tokenizer.dims_min, tokenizer.dims_max, strict=True)
+    ]
+    print(f"\n  量化分辨率（归一化，加速度/曲率）: {resolutions}")
+    print(f"    → 加速度:  {resolutions[0] * action_space.accel_std.item():.6f} m/s²")
+    print(f"    → 曲率:    {resolutions[1] * action_space.curvature_std.item():.8f} 1/m")
 
     # ---- 真实轨迹 ----
     sec("② 加载真实轨迹")
@@ -81,7 +80,7 @@ if __name__ == "__main__":
     print(f"  动作 shape = {tuple(action.shape)}   （64 waypoints × (accel, curvature)）")
     print(f"  动作范围: accel [{action[...,0].min():.2f}, {action[...,0].max():.2f}], "
           f"curv [{action[...,1].min():.2f}, {action[...,1].max():.2f}]  (归一化单位)")
-    print(f"\n  round-trip 误差（逐 waypoint L2, 单位 m）:")
+    print("\n  round-trip 误差（逐 waypoint L2, 单位 m）:")
     print(f"    mean = {e_cont.mean():.4f}   max = {e_cont.max():.4f}")
 
     # ---- ② 量化 round-trip ----
@@ -92,17 +91,18 @@ if __name__ == "__main__":
           f"（num_bins={tokenizer.num_bins}）")
     fut_xyz_q, _, _ = tokenizer.decode(hist_xyz, hist_rot, tokens)
     e_quant = err(fut_xyz_q, fut_xyz)
-    print(f"\n  量化 round-trip 误差（逐 waypoint L2, 单位 m）:")
+    print("\n  量化 round-trip 误差（逐 waypoint L2, 单位 m）:")
     print(f"    mean = {e_quant.mean():.4f}   max = {e_quant.max():.4f}")
 
     # ---- ③ 对比 ----
     sec("⑤ 结论：量化额外损失了多少？")
     print(f"  连续 round-trip  mean = {e_cont.mean():.4f} m")
     print(f"  量化 round-trip  mean = {e_quant.mean():.4f} m")
-    print(f"  → 量化额外引入 {e_quant.mean() - e_cont.mean():.4f} m（"
-          f"{(e_quant.mean()/e_cont.mean() - 1)*100:+.0f}%）")
+    print(f"  → 相对真值的平均误差变化 = {e_quant.mean() - e_cont.mean():+.4f} m")
+    print(f"  → 两种重建轨迹的平均距离 = {err(fut_xyz_q, fut_xyz_rt).mean():.4f} m")
+    print("  误差之差不等于量化扰动的大小；量化也可能偶然抵消部分重建误差。")
 
-    print(f"\n  终点误差：")
+    print("\n  终点误差：")
     print(f"    真值终点   = ({fut_xyz[0,-1,0]:.3f}, {fut_xyz[0,-1,1]:.3f})")
     print(f"    连续还原   = ({fut_xyz_rt[0,-1,0]:.3f}, {fut_xyz_rt[0,-1,1]:.3f})")
     print(f"    量化还原   = ({fut_xyz_q[0,-1,0]:.3f}, {fut_xyz_q[0,-1,1]:.3f})")

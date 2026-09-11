@@ -117,11 +117,23 @@ class ExpertBlock(nn.Module):
 
 
 class Expert(nn.Module):
-    def __init__(self, hidden=HIDDEN, n_blocks=2):
+    """去噪专家。
+
+    注意：动作 token 需要【位置编码】——否则 64 个 waypoint 在 self-attention 里
+    只是一个集合，第 5 个点分不清自己在第 10 个点前面。真实代码同样给 expert 传
+    `position_ids`（alpamayo1_5.py:162 `_build_expert_pos_ids_and_attn_mask`）。
+    条件序列的顺序/身份信息由各输入编码器提供；cross-attention 本身不区分
+    K/V token 的排列，仅把未经编码的标签放在图片旁边不能建立对应关系。
+    """
+    def __init__(self, hidden=HIDDEN, n_blocks=2, max_len=128):
         super().__init__()
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, hidden))   # ← 动作序列的位置编码
         self.blocks = nn.ModuleList([ExpertBlock(hidden) for _ in range(n_blocks)])
 
     def forward(self, x, cond):
+        if x.shape[1] > self.pos_embed.shape[1]:
+            raise ValueError("Input sequence exceeds Expert max_len")
+        x = x + self.pos_embed[:, : x.shape[1]]      # 加上位置编码
         for b in self.blocks:
             x = b(x, cond)
         return x
@@ -129,7 +141,7 @@ class Expert(nn.Module):
 
 # ---- 视觉编码（stage9）----
 def build_vit():
-    """一个真实的 ViT（transformers），小自定义配置匹配 toy 尺寸（16×16、灰度、patch4）。"""
+    """Transformers ViT 结构，随机初始化；16×16 灰度图、patch4，不下载预训练权重。"""
     cfg = ViTConfig(image_size=16, patch_size=4, num_channels=1,
                     hidden_size=HIDDEN, num_hidden_layers=4, num_attention_heads=4,
                     intermediate_size=128, num_labels=0)
@@ -171,15 +183,21 @@ class CausalBlock(nn.Module):
 
 class CosmosReason(nn.Module):
     """迷你 Cosmos-Reason：因果 transformer，自回归生成推理。"""
-    def __init__(self, vocab_size, hidden=HIDDEN, n_blocks=3):
+    def __init__(self, vocab_size, hidden=HIDDEN, n_blocks=3, max_len=128):
         super().__init__()
         self.text_embed = nn.Embedding(vocab_size, hidden)
+        self.pos_embed = nn.Parameter(torch.empty(1, max_len, hidden))
+        nn.init.normal_(self.pos_embed, std=0.02)
         self.blocks = nn.ModuleList([CausalBlock(hidden) for _ in range(n_blocks)])
         self.head = nn.Linear(hidden, vocab_size)
 
     def forward(self, input_embeds, text_ids, mask):
         text = self.text_embed(text_ids)              # (B, L, H)
         x = torch.cat([input_embeds, text], dim=1)    # (B, N+L, H)
+        if x.shape[1] > self.pos_embed.shape[1]:
+            raise ValueError("Input sequence exceeds CosmosReason max_len")
+        # 全序列共享绝对位置；causal mask 控制可见性，位置编码标识历史/图像/文本的位置。
+        x = x + self.pos_embed[:, :x.shape[1]]
         for blk in self.blocks:
             x = blk(x, mask)
         return x

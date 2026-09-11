@@ -1,7 +1,7 @@
 """Stage 14: 完整输入 + CoC —— 历史 + 图片一起进 CosmosReason（toy 中最完整的输入侧示例）
 
-对比 stage13：这里把「历史轨迹」也作为输入，和历史轨迹编码一起拼进 CosmosReason
-的输入序列，再自回归生成 CoC。这才是真实 VLM 的完整输入侧。
+对比 stage13：这里把历史轨迹编码与图片编码一起拼进 CosmosReason，
+再自回归生成短文本。仍省略多相机、多帧、导航和真实 CoC 的语义监督。
 """
 
 import math
@@ -12,8 +12,8 @@ import torch.nn.functional as F
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
-    N_WAYPOINTS, ACTION_DIM, HIDDEN,
-    build_vit, make_causal_mask, CausalBlock, CosmosReason, HistoryEncoder,
+    N_WAYPOINTS, ACTION_DIM,
+    build_vit, make_causal_mask, CosmosReason, HistoryEncoder,
 )
 
 KAPPA = 0.1
@@ -22,10 +22,18 @@ HIST_LEN = 8          # 历史步数
 VISUAL_TOKENS = 17    # ViT 输出：1 CLS + 16 patch
 
 # CoC 词表 + 推理链（同 stage13）
-VOCAB = {"<bos>": 0, "turn": 1, "left": 2, "right": 3, "continue": 4, "straight": 5, "<eos>": 6}
+# ⚠️ 这些是模型【生成】的推理（描述"看到什么"），不是输入指令。
+#    对比 stage10 的【输入】指令词：turn / left / right / continue / straight
+VOCAB = ["<bos>", "<eos>", "shift", "left", "right", "hold", "course", "due", "to", "curve", "clear"]
+V = {t: i for i, t in enumerate(VOCAB)}
 VOCAB_SIZE = len(VOCAB)
-BOS_ID = 0
-REASONING = torch.tensor([[1, 2, 6], [1, 3, 6], [4, 5, 6]])  # turn left / turn right / continue straight
+BOS_ID = V["<bos>"]
+EOS_ID = V["<eos>"]
+REASONING = torch.tensor([
+    [V["shift"], V["left"], V["due"], V["to"], V["curve"], EOS_ID],    # "shift left due to curve"
+    [V["shift"], V["right"], V["due"], V["to"], V["curve"], EOS_ID],   # "shift right due to curve"
+    [V["hold"], V["course"], V["due"], V["to"], V["clear"], EOS_ID],   # "hold course due to clear"
+])
 
 
 def make_image(mode):
@@ -84,13 +92,13 @@ class MiniVLA(nn.Module):
         input_embeds = torch.cat([hist_embeds, visual], dim=1)  # (B, HIST_LEN+17, 64) 融合
 
         text_ids = torch.full((B, 1), BOS_ID, dtype=torch.long)
-        for _ in range(3):                                   # 生成 3 个 token
+        for _ in range(REASONING.shape[1]):                  # 生成 4 个 token
             L = input_embeds.shape[1] + text_ids.shape[1]
             h = self.cosmos(input_embeds, text_ids, make_causal_mask(L))
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)
             text_ids = torch.cat([text_ids, next_tok], dim=1)
 
-        # 与训练保持一致：用「去掉 <bos> 和末尾 <eos>」的推理前缀算 condition
+        # 固定长度教学例：去掉最后的第 3 个生成 token（期望为 EOS，但不保证）。
         text_in = text_ids[:, :-1]                           # [<bos>, t1, t2]
         self.condition = self._reasoning_hidden(input_embeds, text_in)   # (B, 2, 64)
         return text_ids
@@ -109,6 +117,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, target_actions, n_iters=5000, batch=64):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         hist = HISTORIES[mode]
@@ -144,20 +153,23 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = KAPPA
     target[1, :, 1] = -KAPPA
     target[2, :, 1] = 0.0
 
     model = MiniVLA()
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # lr=5e-4：同 stage13，left/right 推理链共享前缀，地形更陡，1e-3 不稳定
+    opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：历史 + 图片一起给，模型生成推理 + 预测轨迹")
     names = ["left", "right", "straight"]
     with torch.no_grad():
         for i, name in enumerate(names):
             traj, text_ids = model.sample(HISTORIES[i:i + 1], IMAGES[i:i + 1])
-            words = [list(VOCAB.keys())[list(VOCAB.values()).index(t)] for t in text_ids[0].tolist()]
+            words = [VOCAB[t] for t in text_ids[0].tolist()]
             end = traj[0, -1, :2]
             print(f"  {name:8s}  推理={' '.join(words)}  终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")

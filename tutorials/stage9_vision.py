@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
-    N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    N_WAYPOINTS, ACTION_DIM,
     build_vit,
 )
 
@@ -35,7 +35,7 @@ IMAGES = torch.stack([make_image(0), make_image(1), make_image(2)])  # (3,1,16,1
 class MiniVLA(nn.Module):
     def __init__(self):
         super().__init__()
-        self.vision = build_vit()   # 真 ViT（替代 toy CNN）
+        self.vision = build_vit()   # 随机初始化的小型 ViT（使用 Transformers 实现）
         self.in_proj = ActionInProj()
         self.expert = Expert()
         self.out_proj = ActionOutProj()
@@ -59,6 +59,7 @@ class MiniVLA(nn.Module):
 
 
 def train(model, opt, target_actions, n_iters=5000, batch=64):
+    model.train()
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         imgs = IMAGES[mode]                          # (B,1,16,16)
@@ -76,6 +77,7 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
 
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
     target[0, :, 1] = KAPPA     # left
     target[1, :, 1] = -KAPPA    # right
@@ -84,6 +86,7 @@ if __name__ == "__main__":
     model = MiniVLA()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     train(model, opt, target)
+    model.eval()
 
     print("\n训练后：给一张图，模型读出方向并预测轨迹")
     with torch.no_grad():

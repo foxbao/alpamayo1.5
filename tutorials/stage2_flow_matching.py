@@ -1,3 +1,9 @@
+"""Stage 2: 向量场采样直觉 —— 已知收缩场上的欧拉积分。
+
+这里的 ``target - x`` 是人为提供的 oracle 向量场，用来展示采样循环；
+并非训练得到的 flow-matching 网络。真正的插值、损失和训练见 stage6。
+"""
+
 import torch
 
 BATCH = 2
@@ -33,6 +39,8 @@ if __name__ == "__main__":
     target=torch.zeros(BATCH, N_WAYPOINTS, ACTION_DIM)
     
     def mock_step_fn(x, t):
+        # 仅演示收缩场 dx/dt=target-x；t=1 时仍保留约 e^-1 的初始误差，
+        # 并不是 stage6 的直线 flow matching 真值速度 x1-x0。
         return target-x
 
     x=torch.randn(BATCH, N_WAYPOINTS, ACTION_DIM)
@@ -46,4 +54,4 @@ if __name__ == "__main__":
         if i in (1,4,9):
             print(f"  step{i+1:2d}: mean={x.mean():+.3f}  std={x.std():.3f}")
     sampled=fm.sample(mock_step_fn)
-    print(f"\n最终采样动作: mean={sampled.mean():+.3f}  std={sampled.std():.3f}")
+    print(f"\n另一次独立采样: mean={sampled.mean():+.3f}  std={sampled.std():.3f}")
