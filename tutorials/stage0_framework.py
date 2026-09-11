@@ -40,7 +40,7 @@ class ActionOutProj(nn.Module):
 
 
 # ---- 5) Expert：去噪器，cross-attn 读 VLM 隐状态（先空着）----
-class Expert(nn.Module):
+class CrossAttnExpert(nn.Module):
     def forward(self, action_embeds, vlm_kv):
         # action_embeds:(B,64,HIDDEN)  vlm_kv:(B,L,HIDDEN) -> (B,64,HIDDEN)
         return torch.zeros(BATCH, N_WAYPOINTS, HIDDEN)
@@ -60,7 +60,7 @@ class MiniVLA(nn.Module):
     def __init__(self):
         super().__init__()
         self.vlm = VLM()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.in_proj = ActionInProj()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()

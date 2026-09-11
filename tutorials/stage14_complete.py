@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common import (
-    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
+    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM,
     build_vit, make_causal_mask, CosmosReason, HistoryEncoder,
 )
@@ -83,7 +83,7 @@ class MiniVLA(nn.Module):
         self.vit = build_vit()
         self.cosmos = CosmosReason(VOCAB_SIZE)
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()

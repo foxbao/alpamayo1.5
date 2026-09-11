@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common import (
-    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
+    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
 )
 
@@ -16,7 +16,7 @@ class MiniVLA(nn.Module):
         super().__init__()
         self.cond_seq = nn.Parameter(torch.randn(1, 4, HIDDEN))  # 固定的"路口"条件
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()

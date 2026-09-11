@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common import (
-    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
+    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
     build_vit,
 )
@@ -70,7 +70,7 @@ class MiniVLA(nn.Module):
         )
         self.camera_fusion = nn.TransformerEncoder(layer, num_layers=1)
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()

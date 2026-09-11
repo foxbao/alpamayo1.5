@@ -101,7 +101,7 @@ class ActionOutProj(nn.Module):
 
 
 # ---- Expert（stage4）：cross-attention 去噪器 ----
-class ExpertBlock(nn.Module):
+class CrossAttnBlock(nn.Module):
     def __init__(self, hidden=HIDDEN, n_heads=4):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(hidden, n_heads, batch_first=True)
@@ -118,7 +118,7 @@ class ExpertBlock(nn.Module):
         return x
 
 
-class Expert(nn.Module):
+class CrossAttnExpert(nn.Module):
     """去噪专家（**cross-attention 版** —— 注意：这不是 Alpamayo 的做法）。
 
     ⚠️ 这里的 ExpertBlock 是「self-attn + cross-attn + FFN」，条件作为单独的
@@ -140,7 +140,7 @@ class Expert(nn.Module):
     def __init__(self, hidden=HIDDEN, n_blocks=2, max_len=128):
         super().__init__()
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len, hidden))   # ← 动作序列的位置编码
-        self.blocks = nn.ModuleList([ExpertBlock(hidden) for _ in range(n_blocks)])
+        self.blocks = nn.ModuleList([CrossAttnBlock(hidden) for _ in range(n_blocks)])
 
     def forward(self, x, cond, cond_pad_mask=None):
         """cond_pad_mask: (B, L_cond) bool，True = 忽略该条件位置（如文本的 <pad>）。

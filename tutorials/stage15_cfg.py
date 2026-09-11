@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common import (
-    ActionInProj, ActionOutProj, Expert,
+    ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN, VLM_SEQ_LEN,
 )
 
@@ -34,7 +34,7 @@ class MiniVLA(nn.Module):
         super().__init__()
         self.cond_gen = ConditionGenerator(num_conditions)
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
 
     def step_fn(self, x, t, condition):

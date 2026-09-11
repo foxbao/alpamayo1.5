@@ -93,7 +93,7 @@ class ActionOutProj(nn.Module):
 
 
 # ---- Expert (stage4)：cross-attention 去噪器 ----
-class ExpertBlock(nn.Module):
+class CrossAttnBlock(nn.Module):
     def __init__(self, hidden=HIDDEN, n_heads=4):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(hidden, n_heads, batch_first=True)
@@ -106,10 +106,10 @@ class ExpertBlock(nn.Module):
         x = self.n3(x + self.ffn(x))
         return x
 
-class Expert(nn.Module):
+class CrossAttnExpert(nn.Module):
     def __init__(self, hidden=HIDDEN, n_blocks=2):
         super().__init__()
-        self.blocks = nn.ModuleList([ExpertBlock(hidden) for _ in range(n_blocks)])
+        self.blocks = nn.ModuleList([CrossAttnBlock(hidden) for _ in range(n_blocks)])
     def forward(self, x, cond):
         for b in self.blocks:
             x = b(x, cond)
@@ -126,7 +126,7 @@ class MiniVLA(nn.Module):
     def __init__(self):
         super().__init__()
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()

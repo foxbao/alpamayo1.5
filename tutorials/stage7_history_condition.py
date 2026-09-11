@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 # 复用 stage6 的零件（ActionSpace/FlowMatching/投影/Expert 全都不变）
 from common import (
-    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
+    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN, DT,
 )
 
@@ -50,7 +50,7 @@ class MiniVLA(nn.Module):
         super().__init__()
         self.cond_enc = ConditionEncoder()   # ← 关键变化：Encoder 替代 Embedding
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()

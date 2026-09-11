@@ -38,7 +38,7 @@ PREFIX_LEN = 4          # ② 里的前缀长度（真实里是几千）
 # 做法 ①：cross-attention（通用做法）
 # ═══════════════════════════════════════════════════════════════
 
-class ExpertBlockCrossAttn(nn.Module):
+class CrossAttnBlock(nn.Module):
     """一个 transformer block：self-attn → cross-attn → FFN。"""
 
     def __init__(self, hidden=HIDDEN, n_heads=N_HEADS):
@@ -68,7 +68,7 @@ class ExpertBlockCrossAttn(nn.Module):
 class CrossAttnExpert(nn.Module):
     def __init__(self, hidden=HIDDEN, n_blocks=2):
         super().__init__()
-        self.blocks = nn.ModuleList([ExpertBlockCrossAttn(hidden) for _ in range(n_blocks)])
+        self.blocks = nn.ModuleList([CrossAttnBlock(hidden) for _ in range(n_blocks)])
 
     def forward(self, x, condition):
         for blk in self.blocks:

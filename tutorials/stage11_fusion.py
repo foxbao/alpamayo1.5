@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common import (
-    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
+    ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
     N_WAYPOINTS, ACTION_DIM, HIDDEN,
     build_vit, HistoryEncoder,
 )
@@ -83,7 +83,7 @@ class MiniVLA(nn.Module):
         self.pos_embed = nn.Parameter(torch.empty(1, HIST_LEN + 17 + 2, HIDDEN))
         nn.init.normal_(self.pos_embed, std=0.02)
         self.in_proj = ActionInProj()
-        self.expert = Expert()
+        self.expert = CrossAttnExpert()
         self.out_proj = ActionOutProj()
         self.action_space = ActionSpace()
         self.fm = FlowMatching()
