@@ -83,19 +83,23 @@ class MiniVLA(nn.Module):
         self.action_space = ActionSpace()
         self.fm = FlowMatching()
         self.condition = None
+        self.cond_pad_mask = None
 
     def step_fn(self, x, t):
         emb = self.in_proj(x, t)
-        h = self.expert(emb, self.condition)
+        h = self.expert(emb, self.condition, self.cond_pad_mask)   # ← 屏蔽 <pad>
         return self.out_proj(h)
 
     def _reasoning_hidden(self, visual, text_in):
         """给定 [<bos>, r1, r2, ...]（已补齐到定长），返回推理部分的隐状态（去掉 <bos>）。
 
         训练和推理都走这一条路径，保证 condition 的长度和含义一致。
+        同时设置 `cond_pad_mask`：标记哪些位置是 <pad>，供 Expert 在 cross-attention
+        里屏蔽掉（`ignore_index` 只管 loss，管不到 attention）。
         """
         L = visual.shape[1] + text_in.shape[1]
         h = self.cosmos(visual, text_in, make_causal_mask(L))
+        self.cond_pad_mask = text_in[:, 1:] == PAD_ID         # (B, L-1) True=pad
         return h[:, visual.shape[1] + 1 :]                    # 去掉 <bos>
 
     def generate(self, image, max_len=MAX_LEN):
@@ -103,13 +107,19 @@ class MiniVLA(nn.Module):
         B = image.shape[0]
         visual = self.vit(image).last_hidden_state            # (B,17,64)
         text_ids = torch.full((B, 1), BOS_ID, dtype=torch.long)  # 从 <bos> 开始
+        finished = torch.zeros(B, dtype=torch.bool)          # 逐个样本记录"是否已吐 eos"
         for _ in range(max_len):
             L = VISUAL_TOKENS + text_ids.shape[1]
             h = self.cosmos(visual, text_ids, make_causal_mask(L))
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)  # 贪心取最大
+            # 已结束的样本继续喂 <pad>（不能再让它生成，否则会污染）
+            next_tok = torch.where(
+                finished[:, None], torch.full_like(next_tok, PAD_ID), next_tok
+            )
             text_ids = torch.cat([text_ids, next_tok], dim=1)
-            if bool((next_tok == EOS_ID).all()):
-                break                                        # ← 变长：见到 <eos> 停
+            finished |= (next_tok.squeeze(-1) == EOS_ID)
+            if bool(finished.all()):
+                break                                        # ← 变长：全 batch 都停了才退出
 
         # 把生成结果补齐到定长，使 condition 的形状与训练一致
         gen = text_ids[:, 1:]                                # 去掉 <bos>

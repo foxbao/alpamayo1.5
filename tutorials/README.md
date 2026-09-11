@@ -151,7 +151,7 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 
 3. **模式切换与运行成本**：训练用 `model.train()`，评估用 `model.eval()` + `torch.no_grad()`；后者不会自动关闭 dropout。stage6~15 约 16 万～73 万参数，CPU 可运行，但速度也取决于 batch、序列长度和线程数。真实模型还包含 Expert，不能仅按 VLM 的 8B 估算显存。
 
-4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 现已按 EOS 停止做变长生成（推理链长度 6/6/3），训练时短的补齐、pad 位置用 `ignore_index` 跳过；但 condition 仍是补齐到定长后送入 Expert，没有 attention mask 屏蔽 pad，这一层是简化。teacher forcing 与生成前缀也仍有分布差异。
+4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 按 EOS 停止做变长生成（推理链长度 6/6/3），训练时短的补齐、pad 位置用 `ignore_index` 跳过；condition 也补齐到定长，并用 `key_padding_mask` 让 Expert 的 cross-attention 忽略 pad（对应真实代码的 `_build_expert_pos_ids_and_attn_mask`）。值得记住：`ignore_index` 只让 pad 不参与 loss，**并不会阻止 pad 进入 transformer**——要真正屏蔽必须靠 attention mask。teacher forcing 与生成前缀仍有分布差异。
 
 5. **CFG 不等于曲率放大器**：stage15 对左/右目标随机丢弃条件，空条件学习两者的边缘分布，不是直行目标。各 w 共用初始噪声；w>1 不保证曲率单调增大，更不保证比条件采样安全或准确。
 

@@ -88,10 +88,11 @@ class MiniVLA(nn.Module):
         self.action_space = ActionSpace()
         self.fm = FlowMatching()
         self.condition = None
+        self.cond_pad_mask = None
 
     def step_fn(self, x, t):
         emb = self.in_proj(x, t)
-        h = self.expert(emb, self.condition)
+        h = self.expert(emb, self.condition, self.cond_pad_mask)   # ← 屏蔽 <pad>
         return self.out_proj(h)
 
     def generate(self, hist, img, max_len=MAX_LEN):
@@ -102,13 +103,19 @@ class MiniVLA(nn.Module):
         input_embeds = torch.cat([hist_embeds, visual], dim=1)  # (B, HIST_LEN+17, 64) 融合
 
         text_ids = torch.full((B, 1), BOS_ID, dtype=torch.long)
+        finished = torch.zeros(B, dtype=torch.bool)          # 逐个样本记录"是否已吐 eos"
         for _ in range(max_len):
             L = input_embeds.shape[1] + text_ids.shape[1]
             h = self.cosmos(input_embeds, text_ids, make_causal_mask(L))
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)
+            # 已结束的样本继续喂 <pad>（不能再让它生成，否则会污染）
+            next_tok = torch.where(
+                finished[:, None], torch.full_like(next_tok, PAD_ID), next_tok
+            )
             text_ids = torch.cat([text_ids, next_tok], dim=1)
-            if bool((next_tok == EOS_ID).all()):
-                break                                        # ← 变长：见到 <eos> 停
+            finished |= (next_tok.squeeze(-1) == EOS_ID)
+            if bool(finished.all()):
+                break                                        # ← 变长：全 batch 都停了才退出
 
         # 把生成结果补齐到定长，使 condition 的形状与训练一致
         gen = text_ids[:, 1:]                                # 去掉 <bos>
@@ -120,9 +127,10 @@ class MiniVLA(nn.Module):
         return text_ids
 
     def _reasoning_hidden(self, input_embeds, text_in):
-        """给定 [<bos>, r1, r2, ...]，返回推理部分的隐状态（去掉 <bos> 位置）。"""
+        """给定 [<bos>, r1, r2, ...]，返回推理隐状态（去掉 <bos>）并标记 <pad> 位置。"""
         L = input_embeds.shape[1] + text_in.shape[1]
         h = self.cosmos(input_embeds, text_in, make_causal_mask(L))
+        self.cond_pad_mask = text_in[:, 1:] == PAD_ID         # (B, L-1) True=pad
         return h[:, input_embeds.shape[1] + 1 :]             # 去掉 <bos>
 
     def sample(self, hist, img):

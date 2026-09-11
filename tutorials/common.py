@@ -109,9 +109,11 @@ class ExpertBlock(nn.Module):
         self.n1 = nn.LayerNorm(hidden); self.n2 = nn.LayerNorm(hidden); self.n3 = nn.LayerNorm(hidden)
         self.ffn = nn.Sequential(nn.Linear(hidden, hidden * 4), nn.SiLU(), nn.Linear(hidden * 4, hidden))
 
-    def forward(self, x, cond):
+    def forward(self, x, cond, cond_pad_mask=None):
+        # cond_pad_mask: (B, L_cond) 的 bool，True 表示该 key 位置要被忽略
+        # （变长文本的 <pad> 不能参与 attention——见下面的 Expert 说明）
         x = self.n1(x + self.self_attn(x, x, x)[0])
-        x = self.n2(x + self.cross_attn(x, cond, cond)[0])
+        x = self.n2(x + self.cross_attn(x, cond, cond, key_padding_mask=cond_pad_mask)[0])
         x = self.n3(x + self.ffn(x))
         return x
 
@@ -130,12 +132,19 @@ class Expert(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len, hidden))   # ← 动作序列的位置编码
         self.blocks = nn.ModuleList([ExpertBlock(hidden) for _ in range(n_blocks)])
 
-    def forward(self, x, cond):
+    def forward(self, x, cond, cond_pad_mask=None):
+        """cond_pad_mask: (B, L_cond) bool，True = 忽略该条件位置（如文本的 <pad>）。
+
+        为什么需要它：`cross_entropy(ignore_index=...)` 只让 pad **不参与 loss**，
+        但 pad 仍然进了 transformer、产生了 hidden，也仍然被 cross-attention 读到。
+        要真正屏蔽，得在 attention 层用 key_padding_mask。
+        真实代码里对应 `_build_expert_pos_ids_and_attn_mask`（alpamayo1_5.py:162）。
+        """
         if x.shape[1] > self.pos_embed.shape[1]:
             raise ValueError("Input sequence exceeds Expert max_len")
         x = x + self.pos_embed[:, : x.shape[1]]      # 加上位置编码
         for b in self.blocks:
-            x = b(x, cond)
+            x = b(x, cond, cond_pad_mask)
         return x
 
 
