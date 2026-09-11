@@ -123,7 +123,10 @@ stage0~15 与两个 1D 示例不下载权重；`real1/4` 需要 HF 配置、toke
 最后再选读 **real1→real6**：它们面向真实 release 的输入追踪、推理、缓存、几何 round-trip、评估和消融，可能需要
 Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 
-`tutorials/exp_fourier.py` 是 stage3 之后的可选实验，用来观察 Fourier 频率数量对拟合的影响；它不属于主线，且默认不纳入教程回归测试。
+两个可选实验（不属于主线，默认不纳入回归测试）：
+- `tutorials/exp_fourier.py` —— stage3 之后，观察 Fourier 频率数量对拟合高频函数的影响。
+- `tutorials/exp_kv_cache.py` —— stage13 之后，对比「每步重算前缀」与「prefill + KV cache」：
+  输出相同，计算量随长度平方拉开（长度 4→512 时差距 7→384 倍）。
 
 ---
 
@@ -153,7 +156,12 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 
 4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 按 EOS 停止做变长生成（推理链长度 6/6/3），训练时短的补齐、pad 位置用 `ignore_index` 跳过；condition 也补齐到定长，并用 `key_padding_mask` 让 Expert 的 cross-attention 忽略 pad（对应真实代码的 `_build_expert_pos_ids_and_attn_mask`）。值得记住：`ignore_index` 只让 pad 不参与 loss，**并不会阻止 pad 进入 transformer**——要真正屏蔽必须靠 attention mask。teacher forcing 与生成前缀仍有分布差异。
 
-5. **CFG 不等于曲率放大器**：stage15 对左/右目标随机丢弃条件，空条件学习两者的边缘分布，不是直行目标。各 w 共用初始噪声；w>1 不保证曲率单调增大，更不保证比条件采样安全或准确。
+5. **KV cache：toy 每步重算前缀，真实用缓存**。stage13 的 `generate` 每步把整条前缀重喂一遍
+   （O(n²)）；真实 LLM 推理是 prefill 一次 + 每步只算新 token（O(n)），并把缓存直接交给 Expert。
+   两者**输出相同**，但计算量随长度平方拉开（`exp_kv_cache.py` 实测：长度 4→512 时差距 7→384 倍）。
+   别把 toy 的「重跑一次拿 hidden」当成真实机制——真实里没有那第二次 forward。
+
+6. **CFG 不等于曲率放大器**：stage15 对左/右目标随机丢弃条件，空条件学习两者的边缘分布，不是直行目标。各 w 共用初始噪声；w>1 不保证曲率单调增大，更不保证比条件采样安全或准确。
 
 ---
 

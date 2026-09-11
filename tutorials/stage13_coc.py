@@ -14,6 +14,13 @@
     ① padding —— 训练时把短链补齐，用 IGNORE_INDEX 标记 pad（同训练教程 train2 的标签掩码）
     ② 生成时按 EOS 停止，而不是固定步数
 
+⚠️ 本 stage 的 `generate` 每一步都把【整条前缀】重新喂给 CosmosReason —— 这是 toy 的简化。
+   真实推理用 **KV cache**：prefill 一次，之后每步只算新 token。
+       prompt_cache = vlm_outputs.past_key_values     # 生成时留下的缓存
+       expert(..., past_key_values=prompt_cache)      # Expert 直接复用，连第二次 forward 都省了
+   本 stage 之所以要「重跑一次拿 hidden 当 condition」，就是因为没有缓存。
+   机制细节和计算量对比见 `exp_kv_cache.py`；KV cache 为什么必需见 `real3_kv_cache.py`。
+
 注意：本 stage 把输入简化成了「只有图片」，省略了历史轨迹。完整版见 stage14_complete.py。
 """
 
