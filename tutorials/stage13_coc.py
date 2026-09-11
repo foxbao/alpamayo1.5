@@ -30,8 +30,8 @@ import torch.nn.functional as F
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, Expert,
-    N_WAYPOINTS, ACTION_DIM,
-    build_vit, make_causal_mask, CosmosReason,
+    N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit, make_causal_mask, CosmosReason, CacheStack,
 )
 
 KAPPA = 0.1
@@ -183,6 +183,61 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
             print(f"iter {it:4d}  cot_loss={cot_loss.item():.4f}  fm_loss={fm_loss.item():.4f}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# Part 2：换一种「条件化」方式 —— prefix（Alpamayo 的真实做法）
+# ═══════════════════════════════════════════════════════════════
+
+class PrefixMiniVLA(nn.Module):
+    """和 Part 1 同样的任务，但条件用【prefix 续写】传递。
+
+    VLM 把视觉 token 编码成前缀、留下【逐层 K/V】；Expert 用【同一种 block、
+    同层数】接在后面继续算。注意 `step_fn` 里【没有 condition 参数】——
+    条件完全在 caches 里。（真实里前缀还包括 CoC 文本；这里聚焦「连接方式」的
+    对比，只用视觉 token。）
+    """
+
+    def __init__(self, n_layers=3):
+        super().__init__()
+        self.vit = build_vit()
+        self.vlm = CacheStack(n_layers=n_layers)      # 编码前缀 → 产 cache
+        self.expert = CacheStack(n_layers=n_layers)   # 同结构 → 能接 cache
+        self.in_proj = ActionInProj()
+        self.out_proj = ActionOutProj()
+        self.action_space = ActionSpace()
+        self.fm = FlowMatching()
+
+    def build_caches(self, image):
+        visual = self.vit(image).last_hidden_state    # (B,17,HIDDEN)
+        _, caches = self.vlm(visual, causal=True)     # ← 逐层 K/V
+        return caches
+
+    def step_fn(self, x, t, caches):
+        emb = self.in_proj(x, t)
+        h, _ = self.expert(emb, caches=caches, causal=False)   # ← 没有 condition
+        return self.out_proj(h)
+
+    def sample(self, image):
+        caches = self.build_caches(image)
+        action = self.fm.sample(lambda x, t: self.step_fn(x, t, caches),
+                                batch_size=image.shape[0])
+        return self.action_space.action_to_traj(action)
+
+
+def train_prefix(model, opt, target_actions, n_iters=2000, batch=64):
+    model.train()
+    for it in range(n_iters):
+        mode = torch.randint(0, 3, (batch,))
+        caches = model.build_caches(IMAGES[mode])     # 前缀的逐层 K/V
+        x1 = target_actions[mode]
+        x0 = torch.randn(batch, N_WAYPOINTS, ACTION_DIM)
+        t = torch.rand(batch)
+        x_t = (1 - t[:, None, None]) * x0 + t[:, None, None] * x1
+        loss = F.mse_loss(model.step_fn(x_t, t, caches), x1 - x0)
+        opt.zero_grad(); loss.backward(); opt.step()
+        if it % 400 == 0:
+            print(f"  iter {it:4d}  loss={loss.item():.4f}")
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
@@ -211,3 +266,33 @@ if __name__ == "__main__":
             n_gen = len(text_ids[0]) - 1                  # 去掉 <bos>
             end = traj[0, -1, :2]
             print(f"  {name:9s} 生成 {n_gen} 个 token: {' '.join(words):<40} 终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Part 2：换一种「条件化」方式（prefix —— Alpamayo 的真实做法）
+    # ═══════════════════════════════════════════════════════════════
+    print("\n" + "=" * 70)
+    print("Part 2：同一个任务，改用 prefix 方式条件化")
+    print("=" * 70)
+    print("  Part 1 的调法:  expert(emb, condition)   ← 单独传条件张量")
+    print("  Part 2 的调法:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里\n")
+
+    prefix_model = PrefixMiniVLA()
+    opt2 = torch.optim.Adam(prefix_model.parameters(), lr=5e-4)
+    train_prefix(prefix_model, opt2, target)
+    prefix_model.eval()
+
+    print("\n  cache 结构（层数 = block 数）：")
+    with torch.no_grad():
+        cs = prefix_model.build_caches(IMAGES[0:1])
+    for i, (k, v) in enumerate(cs):
+        print(f"    layer {i}: K{tuple(k.shape)}  V{tuple(v.shape)}")
+
+    print("\n  两种方式的输出对比：")
+    print(f"  {'':<10}{'① cross-attn':>18}{'② prefix':>18}")
+    with torch.no_grad():
+        for i, name in enumerate(names):
+            traj_a, _ = model.sample(IMAGES[i:i + 1])
+            traj_b = prefix_model.sample(IMAGES[i:i + 1])
+            ya, yb = traj_a[0, -1, 1].item(), traj_b[0, -1, 1].item()
+            print(f"  {name:<10}{ya:>+16.2f}{yb:>+18.2f}")
+    print("\n  → 两种连接方式都能把条件传给动作，终点 y 的符号一致")

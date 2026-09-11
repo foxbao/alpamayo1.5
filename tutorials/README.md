@@ -80,7 +80,7 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 10 | `stage10_text.py` | 文本编码 | 文本 token → embedding → transformer → condition |
 | 11 | `stage11_fusion.py` | 多模态融合 | 三路 token concat + 位置编码，再由 Expert 读取（⚠️ 三路在此为冗余，只演示「怎么合」，不证明「为何必须合」） |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 每路标签/图片上下文化，再 concat |
-| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成 CoC（**变长，见 EOS 停**），隐状态作为 condition |
+| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成 CoC（**变长，见 EOS 停**）；**Part 2 用 prefix 方式重做同一任务并对比** |
 | 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason，同样变长生成（toy 里最完整的输入侧；与真实的差距见 §六） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 条件丢弃训练 + `v=(1-w)·v_uncond + w·v_cond`，w>1 外推向量场 |
 

@@ -158,6 +158,70 @@ class Expert(nn.Module):
         return x
 
 
+# ---- prefix 版条件化（Alpamayo 的真实做法；stage13 Part 2 用）----
+# 和上面的 Expert（cross-attention 版）是【两种不同的连接方式】：
+#   cross-attn：动作一路、条件一路，用 cross_attn 连接
+#   prefix：动作 token「续写」在 VLM 的逐层 K/V 后面，没有 cross_attn
+# 详见 stage4_expert.py 的对比、exp_prefix_expert.py 的完整实现。
+class CacheBlock(nn.Module):
+    """因果 transformer block，**支持 KV cache**。
+
+    和 CausalBlock 是同一类东西（因果自注意力 + FFN），区别是这里手写注意力
+    以便暴露 cache —— 这样 Expert 才能接在它后面继续算。
+    """
+
+    def __init__(self, hidden=HIDDEN, n_heads=4):
+        super().__init__()
+        self.n_heads = n_heads
+        self.ln1 = nn.LayerNorm(hidden)
+        self.qkv = nn.Linear(hidden, 3 * hidden)
+        self.proj = nn.Linear(hidden, hidden)
+        self.ln2 = nn.LayerNorm(hidden)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden, 4 * hidden), nn.SiLU(), nn.Linear(4 * hidden, hidden)
+        )
+
+    def forward(self, x, cache=None, causal=True):
+        """x: (B, T, H)；cache: (k_prev, v_prev) 或 None。
+
+        causal=True  → 序列内部因果（VLM 生成时用）
+        causal=False → 全可见（Expert 里动作 token 之间用，对应真实的
+                       `expert_non_causal_attention=True`）
+        """
+        B, T, _ = x.shape
+        h = self.ln1(x)
+        q, k, v = self.qkv(h).chunk(3, dim=-1)
+        q, k, v = (t.view(B, T, self.n_heads, -1).transpose(1, 2) for t in (q, k, v))
+
+        if cache is not None:                       # ← 拼上前缀的 K/V
+            k = torch.cat([cache[0], k], dim=2)
+            v = torch.cat([cache[1], v], dim=2)
+        new_cache = (k, v)
+
+        attn = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
+        if causal:
+            attn = attn + torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+        attn = torch.softmax(attn, dim=-1)
+        x = x + self.proj((attn @ v).transpose(1, 2).reshape(B, T, -1))
+        x = x + self.ffn(self.ln2(x))
+        return x, new_cache
+
+
+class CacheStack(nn.Module):
+    """N 层 CacheBlock。VLM 和 prefix 版 Expert 都用它（同结构才能共用 cache）。"""
+
+    def __init__(self, hidden=HIDDEN, n_layers=3):
+        super().__init__()
+        self.blocks = nn.ModuleList([CacheBlock(hidden) for _ in range(n_layers)])
+
+    def forward(self, x, caches=None, causal=True):
+        new_caches = []
+        for i, blk in enumerate(self.blocks):
+            x, c = blk(x, None if caches is None else caches[i], causal=causal)
+            new_caches.append(c)
+        return x, new_caches
+
+
 # ---- 视觉编码（stage9）----
 def build_vit():
     """Transformers ViT 结构，随机初始化；16×16 灰度图、patch4，不下载预训练权重。"""
