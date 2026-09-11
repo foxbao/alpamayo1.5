@@ -2,18 +2,19 @@
 
 ⚠️ 关键区分：本 stage 的文本是【模型生成的推理】，**不是**输入指令。
 
-    stage10 的文本:  输入（外部给定的指令，如 "turn left"）
-    stage13 的文本:  输出（模型看完图后【自己写出来】的推理，如 "road curves leftward"）
-
-    为了不让两者混淆，本 stage 特意用了**和 stage10 完全不同的词**：
-        stage10（输入指令）:  turn / left / right / continue / straight
-        stage13（生成推理）:  road / curves / leftward / rightward / runs / ahead
+    stage10 的文本:  输入（外部给定的指令，如 "turn left in 10m"）
+    stage13 的文本:  输出（模型看完图后【自己写出来】的推理）
+                     如 "shift left due to curve" —— 模仿真实 CoC 的「动作 + due to + 原因」
 
     真实 Alpamayo 里两者都存在且角色不同：
         导航指令（输入）→ 影响推理怎么写；CoC 推理（输出）→ 其隐状态影响轨迹怎么出
 
-注意：本 stage 还把输入简化成了「只有图片」，省略了历史轨迹（真实 Alpamayo 的
-历史轨迹是重要输入）。完整版（历史+图片一起进 CosmosReason）见 stage14_complete.py。
+本 stage 还演示【变长生成】：三条推理链长度不同（6 / 6 / 3），生成时遇到 <eos> 就停。
+变长带来的两个机制：
+    ① padding —— 训练时把短链补齐，用 IGNORE_INDEX 标记 pad（同训练教程 train2 的标签掩码）
+    ② 生成时按 EOS 停止，而不是固定步数
+
+注意：本 stage 把输入简化成了「只有图片」，省略了历史轨迹。完整版见 stage14_complete.py。
 """
 
 import torch
@@ -29,22 +30,28 @@ from common import (
 KAPPA = 0.1
 IMG_SIZE = 16
 VISUAL_TOKENS = 17   # ViT 输出：1 CLS + 16 patch
+IGNORE_INDEX = -100  # 和真实代码一致（sft_base_model.py:35）
 
-# 迷你词表：BOS + EOS + 【CoC 推理词】
-# 模仿真实 Alpamayo 的 CoC 模式 —— 「动作 + due to + 原因」，例如：
-#   "move to the left lane due to construction blocking the right side of our lane"
-VOCAB = ["<bos>", "<eos>", "shift", "left", "right", "hold", "course", "due", "to", "curve", "clear"]
+VOCAB = ["<bos>", "<eos>", "<pad>",
+         "shift", "left", "right", "hold", "course", "due", "to", "curve"]
 V = {t: i for i, t in enumerate(VOCAB)}
 VOCAB_SIZE = len(VOCAB)
-BOS_ID = V["<bos>"]
-EOS_ID = V["<eos>"]
+BOS_ID, EOS_ID, PAD_ID = V["<bos>"], V["<eos>"], V["<pad>"]
 
-# 三条 CoC 推理链（5 个词 + eos）—— 是【模型该生成的】，不是喂进去的
-REASONING = torch.tensor([
-    [V["shift"], V["left"], V["due"], V["to"], V["curve"], EOS_ID],    # "shift left due to curve"
-    [V["shift"], V["right"], V["due"], V["to"], V["curve"], EOS_ID],   # "shift right due to curve"
-    [V["hold"], V["course"], V["due"], V["to"], V["clear"], EOS_ID],   # "hold course due to clear"
-])
+# 三条 CoC 推理链，长度【不同】（真实 CoC 本来就是变长的）
+CHAINS = [
+    [V["shift"], V["left"], V["due"], V["to"], V["curve"], EOS_ID],    # 6 个
+    [V["shift"], V["right"], V["due"], V["to"], V["curve"], EOS_ID],   # 6 个
+    [V["hold"], V["course"], EOS_ID],                                  # 3 个 ← 更短
+]
+MAX_LEN = max(len(c) for c in CHAINS)
+
+# 补齐成张量：输入用 <pad>，标签用 IGNORE_INDEX
+REASONING_IN = torch.full((3, MAX_LEN), PAD_ID, dtype=torch.long)
+REASONING_LAB = torch.full((3, MAX_LEN), IGNORE_INDEX, dtype=torch.long)
+for _i, _c in enumerate(CHAINS):
+    REASONING_IN[_i, : len(_c)] = torch.tensor(_c)
+    REASONING_LAB[_i, : len(_c)] = torch.tensor(_c)
 
 
 def make_image(mode):
@@ -83,7 +90,7 @@ class MiniVLA(nn.Module):
         return self.out_proj(h)
 
     def _reasoning_hidden(self, visual, text_in):
-        """给定 [<bos>, r1, r2, ...]，返回推理部分的隐状态（去掉 <bos> 位置）。
+        """给定 [<bos>, r1, r2, ...]（已补齐到定长），返回推理部分的隐状态（去掉 <bos>）。
 
         训练和推理都走这一条路径，保证 condition 的长度和含义一致。
         """
@@ -91,19 +98,25 @@ class MiniVLA(nn.Module):
         h = self.cosmos(visual, text_in, make_causal_mask(L))
         return h[:, visual.shape[1] + 1 :]                    # 去掉 <bos>
 
-    def generate(self, image):
-        """自回归生成推理，隐状态 = condition。"""
+    def generate(self, image, max_len=MAX_LEN):
+        """自回归生成推理：遇到 <eos> 就停（变长）。"""
         B = image.shape[0]
-        n_gen = REASONING.shape[1]                            # 生成几个 token
         visual = self.vit(image).last_hidden_state            # (B,17,64)
         text_ids = torch.full((B, 1), BOS_ID, dtype=torch.long)  # 从 <bos> 开始
-        for _ in range(n_gen):
+        for _ in range(max_len):
             L = VISUAL_TOKENS + text_ids.shape[1]
             h = self.cosmos(visual, text_ids, make_causal_mask(L))
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)  # 贪心取最大
             text_ids = torch.cat([text_ids, next_tok], dim=1)
-        # 与训练一致：用「去掉 <bos> 和末尾 <eos>」的推理前缀算 condition
-        text_in = text_ids[:, :-1]                            # [<bos>, r1, r2, r3]
+            if bool((next_tok == EOS_ID).all()):
+                break                                        # ← 变长：见到 <eos> 停
+
+        # 把生成结果补齐到定长，使 condition 的形状与训练一致
+        gen = text_ids[:, 1:]                                # 去掉 <bos>
+        if gen.shape[1] < max_len:
+            pad = torch.full((B, max_len - gen.shape[1]), PAD_ID, dtype=torch.long)
+            gen = torch.cat([gen, pad], dim=1)
+        text_in = torch.cat([torch.full((B, 1), BOS_ID, dtype=torch.long), gen], dim=1)
         self.condition = self._reasoning_hidden(visual, text_in)
         return text_ids
 
@@ -119,17 +132,23 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
     for it in range(n_iters):
         mode = torch.randint(0, 3, (batch,))
         img = IMAGES[mode]
-        reasoning = REASONING[mode]                       # (B,4) 目标推理（模型该生成的）
+        r_in = REASONING_IN[mode]                         # (B,MAX) 用 <pad> 补齐
+        r_lab = REASONING_LAB[mode]                       # (B,MAX) 用 IGNORE_INDEX 补齐
 
         # ① CosmosReason 训练：teacher forcing
         visual = model.vit(img).last_hidden_state         # (B,17,64)
         bos = torch.full((batch, 1), BOS_ID, dtype=torch.long)
-        text_in = torch.cat([bos, reasoning[:, :-1]], dim=1)   # [bos, road, curves, leftward]
+        text_in = torch.cat([bos, r_in[:, :-1]], dim=1)        # (B,MAX)
         L = VISUAL_TOKENS + text_in.shape[1]
         h = model.cosmos(visual, text_in, make_causal_mask(L))
-        text_h = h[:, VISUAL_TOKENS:]                     # 用于语言建模损失
+        text_h = h[:, VISUAL_TOKENS:]                     # (B,MAX)
         logits = model.cosmos.head(text_h)
-        cot_loss = F.cross_entropy(logits.reshape(-1, VOCAB_SIZE), reasoning.reshape(-1))
+        # ← 变长的代价：pad 位置用 ignore_index 跳过（同训练教程 train2 的标签掩码）
+        cot_loss = F.cross_entropy(
+            logits.reshape(-1, VOCAB_SIZE),
+            r_lab.reshape(-1),
+            ignore_index=IGNORE_INDEX,
+        )
 
         # ② Expert 训练：condition = 推理前缀隐状态（去 <bos>），与推理时一致
         model.condition = model._reasoning_hidden(visual, text_in)
@@ -154,21 +173,24 @@ if __name__ == "__main__":
     target[1, :, 1] = -KAPPA
     target[2, :, 1] = 0.0
 
-    print("词表里的推理词（模型该【生成】的）:", [w for w in VOCAB if w not in ("<bos>", "<eos>")])
-    print("（对比 stage10 的【输入】指令词: turn / left / right / continue / straight）\n")
+    print("三条推理链（长度【不同】）：")
+    for i, c in enumerate(CHAINS):
+        words = " ".join(VOCAB[t] for t in c)
+        print(f"  {['left','right','straight'][i]:9s} {len(c)} 个 token:  {words}")
+    print(f"  → 最长 {MAX_LEN}，训练时短的补齐、用 IGNORE_INDEX 不算 loss\n")
 
     model = MiniVLA()
-    # lr=5e-4：left/right 的推理链共享前两个词（road curves），损失地形比旧词表更陡，
-    # lr=1e-3 在部分种子上会崩溃（三个场景生成同一句）。降到 5e-4 才稳定。
+    # lr=5e-4：left/right 推理链共享前缀，地形较陡，1e-3 在部分种子上会崩
     opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     train(model, opt, target)
     model.eval()
 
-    print("\n训练后：给一张图，模型自回归【生成】推理 + 预测轨迹")
+    print("\n训练后：给一张图，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
     names = ["left", "right", "straight"]
     with torch.no_grad():
         for i, name in enumerate(names):
             traj, text_ids = model.sample(IMAGES[i:i + 1])
             words = [VOCAB[t] for t in text_ids[0].tolist()]
+            n_gen = len(text_ids[0]) - 1                  # 去掉 <bos>
             end = traj[0, -1, :2]
-            print(f"  {name:8s}  生成的推理={' '.join(words)}  终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")
+            print(f"  {name:9s} 生成 {n_gen} 个 token: {' '.join(words):<40} 终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")

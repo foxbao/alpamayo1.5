@@ -78,10 +78,10 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 8 | `stage8_multimodal.py` | 多峰分布（并列分支） | 同一条件采出左转/右转两簇；单输出 MSE 回归只拟合条件均值 |
 | 9 | `stage9_vision.py` | 视觉编码（ViT 结构） | 随机初始化的 Transformers ViT 把图片编码成 visual tokens 当 condition |
 | 10 | `stage10_text.py` | 文本编码 | 文本 token → embedding → transformer → condition |
-| 11 | `stage11_fusion.py` | 多模态融合 | 三路 token concat + 位置编码，再由 Expert 读取 |
+| 11 | `stage11_fusion.py` | 多模态融合 | 三路 token concat + 位置编码，再由 Expert 读取（⚠️ 三路在此为冗余，只演示「怎么合」，不证明「为何必须合」） |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 每路标签/图片上下文化，再 concat |
-| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成短文本，隐状态作为 condition（展示 VLM 接口思路） |
-| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason（toy 里最完整的输入侧；仍与真实有差距，见 §六） |
+| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成 CoC（**变长，见 EOS 停**），隐状态作为 condition |
+| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason，同样变长生成（toy 里最完整的输入侧；与真实的差距见 §六） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 条件丢弃训练 + `v=(1-w)·v_uncond + w·v_cond`，w>1 外推向量场 |
 
 **演进脉络（每个 stage 相对上一个改了什么）：**
@@ -151,7 +151,7 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 
 3. **模式切换与运行成本**：训练用 `model.train()`，评估用 `model.eval()` + `torch.no_grad()`；后者不会自动关闭 dropout。stage6~15 约 16 万～73 万参数，CPU 可运行，但速度也取决于 batch、序列长度和线程数。真实模型还包含 Expert，不能仅按 VLM 的 8B 估算显存。
 
-4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 固定生成三个 token，最后一个仅期望为 EOS，不实现通用变长停止；teacher forcing 与生成前缀仍有分布差异。
+4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 现已按 EOS 停止做变长生成（推理链长度 6/6/3），训练时短的补齐、pad 位置用 `ignore_index` 跳过；但 condition 仍是补齐到定长后送入 Expert，没有 attention mask 屏蔽 pad，这一层是简化。teacher forcing 与生成前缀也仍有分布差异。
 
 5. **CFG 不等于曲率放大器**：stage15 对左/右目标随机丢弃条件，空条件学习两者的边缘分布，不是直行目标。各 w 共用初始噪声；w>1 不保证曲率单调增大，更不保证比条件采样安全或准确。
 

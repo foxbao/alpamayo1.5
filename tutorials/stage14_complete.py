@@ -22,18 +22,28 @@ HIST_LEN = 8          # 历史步数
 VISUAL_TOKENS = 17    # ViT 输出：1 CLS + 16 patch
 
 # CoC 词表 + 推理链（同 stage13）
-# ⚠️ 这些是模型【生成】的推理（描述"看到什么"），不是输入指令。
-#    对比 stage10 的【输入】指令词：turn / left / right / continue / straight
-VOCAB = ["<bos>", "<eos>", "shift", "left", "right", "hold", "course", "due", "to", "curve", "clear"]
+# ⚠️ 这些是模型【生成】的推理，不是输入指令。
+#    对比 stage10 的【输入】指令词：turn / left / right / keep / straight / in / 10m / 30m
+VOCAB = ["<bos>", "<eos>", "<pad>",
+         "shift", "left", "right", "hold", "course", "due", "to", "curve"]
 V = {t: i for i, t in enumerate(VOCAB)}
 VOCAB_SIZE = len(VOCAB)
-BOS_ID = V["<bos>"]
-EOS_ID = V["<eos>"]
-REASONING = torch.tensor([
-    [V["shift"], V["left"], V["due"], V["to"], V["curve"], EOS_ID],    # "shift left due to curve"
-    [V["shift"], V["right"], V["due"], V["to"], V["curve"], EOS_ID],   # "shift right due to curve"
-    [V["hold"], V["course"], V["due"], V["to"], V["clear"], EOS_ID],   # "hold course due to clear"
-])
+BOS_ID, EOS_ID, PAD_ID = V["<bos>"], V["<eos>"], V["<pad>"]
+IGNORE_INDEX = -100
+
+# 三条推理链，长度【不同】（真实 CoC 是变长的）
+CHAINS = [
+    [V["shift"], V["left"], V["due"], V["to"], V["curve"], EOS_ID],    # 6 个
+    [V["shift"], V["right"], V["due"], V["to"], V["curve"], EOS_ID],   # 6 个
+    [V["hold"], V["course"], EOS_ID],                                  # 3 个 ← 更短
+]
+MAX_LEN = max(len(c) for c in CHAINS)
+
+REASONING_IN = torch.full((3, MAX_LEN), PAD_ID, dtype=torch.long)
+REASONING_LAB = torch.full((3, MAX_LEN), IGNORE_INDEX, dtype=torch.long)
+for _i, _c in enumerate(CHAINS):
+    REASONING_IN[_i, : len(_c)] = torch.tensor(_c)
+    REASONING_LAB[_i, : len(_c)] = torch.tensor(_c)
 
 
 def make_image(mode):
@@ -84,23 +94,29 @@ class MiniVLA(nn.Module):
         h = self.expert(emb, self.condition)
         return self.out_proj(h)
 
-    def generate(self, hist, img):
-        """历史 + 图片 → 融合 → 自回归生成 CoC → 隐状态 = condition。"""
+    def generate(self, hist, img, max_len=MAX_LEN):
+        """历史 + 图片 → 融合 → 自回归生成 CoC（见到 <eos> 停）→ 隐状态 = condition。"""
         B = hist.shape[0]
         hist_embeds = self.hist_enc(hist)                    # (B, HIST_LEN, 64)
         visual = self.vit(img).last_hidden_state             # (B, 17, 64)
         input_embeds = torch.cat([hist_embeds, visual], dim=1)  # (B, HIST_LEN+17, 64) 融合
 
         text_ids = torch.full((B, 1), BOS_ID, dtype=torch.long)
-        for _ in range(REASONING.shape[1]):                  # 生成 4 个 token
+        for _ in range(max_len):
             L = input_embeds.shape[1] + text_ids.shape[1]
             h = self.cosmos(input_embeds, text_ids, make_causal_mask(L))
             next_tok = self.cosmos.head(h[:, -1]).argmax(-1, keepdim=True)
             text_ids = torch.cat([text_ids, next_tok], dim=1)
+            if bool((next_tok == EOS_ID).all()):
+                break                                        # ← 变长：见到 <eos> 停
 
-        # 固定长度教学例：去掉最后的第 3 个生成 token（期望为 EOS，但不保证）。
-        text_in = text_ids[:, :-1]                           # [<bos>, t1, t2]
-        self.condition = self._reasoning_hidden(input_embeds, text_in)   # (B, 2, 64)
+        # 把生成结果补齐到定长，使 condition 的形状与训练一致
+        gen = text_ids[:, 1:]                                # 去掉 <bos>
+        if gen.shape[1] < max_len:
+            pad = torch.full((B, max_len - gen.shape[1]), PAD_ID, dtype=torch.long)
+            gen = torch.cat([gen, pad], dim=1)
+        text_in = torch.cat([torch.full((B, 1), BOS_ID, dtype=torch.long), gen], dim=1)
+        self.condition = self._reasoning_hidden(input_embeds, text_in)
         return text_ids
 
     def _reasoning_hidden(self, input_embeds, text_in):
@@ -122,19 +138,25 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
         mode = torch.randint(0, 3, (batch,))
         hist = HISTORIES[mode]
         img = IMAGES[mode]
-        reasoning = REASONING[mode]
+        r_in = REASONING_IN[mode]                         # (B,MAX) 用 <pad> 补齐
+        r_lab = REASONING_LAB[mode]                       # (B,MAX) 用 IGNORE_INDEX 补齐
 
         # ① CosmosReason：teacher forcing
         hist_embeds = model.hist_enc(hist)                   # (B,H,64)
         visual = model.vit(img).last_hidden_state            # (B,17,64)
         input_embeds = torch.cat([hist_embeds, visual], dim=1)
         bos = torch.full((batch, 1), BOS_ID, dtype=torch.long)
-        text_in = torch.cat([bos, reasoning[:, :-1]], dim=1)  # [bos, turn, left]
+        text_in = torch.cat([bos, r_in[:, :-1]], dim=1)      # (B,MAX)
         L = input_embeds.shape[1] + text_in.shape[1]
         h = model.cosmos(input_embeds, text_in, make_causal_mask(L))
         text_h = h[:, input_embeds.shape[1]:]                # 用于语言建模损失
         logits = model.cosmos.head(text_h)
-        cot_loss = F.cross_entropy(logits.reshape(-1, VOCAB_SIZE), reasoning.reshape(-1))
+        # ← 变长的代价：pad 位置用 ignore_index 跳过（同训练教程 train2 的标签掩码）
+        cot_loss = F.cross_entropy(
+            logits.reshape(-1, VOCAB_SIZE),
+            r_lab.reshape(-1),
+            ignore_index=IGNORE_INDEX,
+        )
 
         # ② Expert：condition = 推理前缀隐状态（去 <bos>），与推理时一致
         model.condition = model._reasoning_hidden(input_embeds, text_in)   # (B,2,64)
@@ -165,11 +187,16 @@ if __name__ == "__main__":
     train(model, opt, target)
     model.eval()
 
-    print("\n训练后：历史 + 图片一起给，模型生成推理 + 预测轨迹")
+    print("三条推理链（长度【不同】）：")
+    for i, c in enumerate(CHAINS):
+        print(f"  {['left','right','straight'][i]:9s} {len(c)} 个 token:  {' '.join(VOCAB[t] for t in c)}")
+
+    print("\n训练后：历史 + 图片一起给，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
     names = ["left", "right", "straight"]
     with torch.no_grad():
         for i, name in enumerate(names):
             traj, text_ids = model.sample(HISTORIES[i:i + 1], IMAGES[i:i + 1])
             words = [VOCAB[t] for t in text_ids[0].tolist()]
+            n_gen = len(text_ids[0]) - 1                  # 去掉 <bos>
             end = traj[0, -1, :2]
-            print(f"  {name:8s}  推理={' '.join(words)}  终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")
+            print(f"  {name:9s} 生成 {n_gen} 个 token: {' '.join(words):<40} 终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")
