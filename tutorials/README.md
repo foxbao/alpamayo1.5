@@ -127,6 +127,9 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 - `tutorials/exp_fourier.py` —— stage3 之后，观察 Fourier 频率数量对拟合高频函数的影响。
 - `tutorials/exp_kv_cache.py` —— stage13 之后，对比「每步重算前缀」与「prefill + KV cache」：
   输出相同，计算量随长度平方拉开（长度 4→512 时差距 7→384 倍）。
+- `tutorials/exp_prefix_expert.py` —— 用 **Alpamayo 真实的 prefix 方式**实现条件化：
+  VLM 产 cache（逐层 K/V）→ Expert 接在后面算。**没有 cross-attention，没有独立的 condition 张量**；
+  条件完全通过 cache 传递。跑通并训练到收敛，可和 stage4~15 的 cross-attention 版对照。
 
 ---
 
@@ -189,7 +192,7 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 | 历史轨迹 | 8~16 步序列 | **48 个 token**（16 位姿 × 3 维） | 表示 |
 | 未来轨迹 | 64 waypoints（动作空间 `(64,2)`） | `tokens_per_future_traj=128`、`traj_vocab_size=4000` | 表示 |
 | Expert hidden | 64 | **2048**（`expert_cfg.hidden_size`） | 规模 |
-| **条件机制** | **显式 cross-attention** `attn(x, cond, cond)` | **KV-cache prefix attention**（VLM 的 KV cache 直接接进 expert 的 `past_key_values`） | ⚠️ **结构差异** |
+| **条件机制** | **显式 cross-attention**：动作一路、条件一路，用 `attn(x, cond, cond)` 连接 | **prefix 续写**：**真实 Expert 没有任何 cross-attention**——它和 VLM 文本塔**结构完全相同**（`self_attn + MLP`），动作 token 直接**接在 VLM 序列后面**，用 self-attention 看前缀 | ⚠️ **连接拓扑不同** |
 | 条件长度 | 2~36 个 token（依 stage 而变） | 完整多模态前缀的逐层 K/V，含视觉，示例超过 3000 个位置 | 规模/表示 |
 | 位置编码 | 可学习 `pos_embed` | **RoPE**（旋转位置编码，Qwen 系） | 实现差异 |
 | 动作积分 | 固定 `v0` + 欧拉 + Python 循环 | 从历史**估计 v0** + **梯形积分** + `cumsum` 向量化 + **输出旋转矩阵** | 精度/工程 |
@@ -219,6 +222,30 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 **关键结论**：KV cache 可以避免每个扩散步重复计算前缀；上面的 token 数只是直观示意，
 不应直接当成真实模型的加速倍数。真实收益还取决于 attention kernel、缓存布局和硬件。
 后半段的“只跑动作”根本没有读前缀 K/V，所以也不能作为缓存分支的精确成本或严格上界。
+
+**①-b 两种「条件化」的设计哲学（比上面那条更根本）**
+
+```
+toy（两路 · cross-attention）:
+    动作 token ──► [Expert] ──┐
+                              ├─ cross-attn 连接两路
+    条件 (B,L,64) ────────────┘
+
+真实（一路 · prefix 续写）:
+    VLM 的 KV cache（前缀）┐
+                           ├─► 拼成【一条序列】──► [Expert] ──► 输出
+    动作 token ────────────┘
+```
+
+实测（`Qwen3VLTextModel` 的第 0 层）：真实 Expert 的子模块只有
+`self_attn + mlp + 2×RMSNorm`——**和 VLM 文本塔的第 0 层一模一样**，没有 cross-attention。
+
+所以差异不是「换了一种 attention」，而是「**完全不同的连接方式**」：
+- toy：两条数据流，靠 cross-attention 沟通（这也是 Stable Diffusion 文本条件的做法）
+- 真实：一条数据流，动作 token「续写」在前缀后面，靠 self-attention 沟通
+
+**两者都是合法的 VLA 设计，但 toy 用的不是 Alpamayo 的设计。** 要让 toy 与真实一致，需要：
+① 层数对上；② **去掉 ExpertBlock 的 cross-attention**，改成与 `CausalBlock` 同类型；③ hidden/heads 对齐。
 
 **② CFG 的无条件分支**：toy 学了一个「空条件 embedding」来表示「无指令」；
 真实代码是**从输入序列里删掉 `<|route_start|>...<|route_end|>` 那一段**（`nav_utils.remove_nav_text`），
