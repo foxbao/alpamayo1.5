@@ -24,6 +24,13 @@
   一个靠 cross-attn 沟通两条数据流，一个靠 self-attn 看前缀。
   **两者都合法，但 toy 主线用的 ① 不是 Alpamayo 的设计。**
 
+  ⚠️ 这是【两种对等的拓扑】，不是「① 学会了才轮到 ②」的进阶关系。
+  toy 主线（stage4~12）选 ① 是有理由的：它的条件是一份显式的 `(B, L, H)` 张量，
+  你可以在 stage7~12 里直接 `print(condition.shape)` 看清「历史 8 步」「图片 17 个 patch」
+  是怎么拼起来的 —— 正合「跑一跑看看维度」的学习方式。② 的条件埋在 K/V 里，
+  你只能看到 `K(1, 4, 32, 64)`，看不出里面装了什么。
+  两条路的并排对照见 stage13/14（Part 1 = ① 对照组，Part 2 = ② 真实做法）。
+
 【简化】
   - 两种 Expert 都只有 2 层、hidden=64；真实是 30+ 层、hidden=2048
   - ① 用 PyTorch 的 nn.MultiheadAttention；真实 Expert 是 Qwen3 文本塔 + RoPE

@@ -205,6 +205,13 @@
 <sub>考点：① 是 `step_fn(x, t)` 用 `self.condition`；② 是 `step_fn(x, t, caches)`。
 说明条件在 ② 里【完全通过 cache 传递】，没有单独的 condition 张量</sub>
 
+**13-5b** Part 1 和 Part 2 是「进阶关系」还是「对等关系」？为什么留着 Part 1？
+<sub>考点：**对等** —— 两种连接拓扑，不是「学会了①才轮到②」。留着 Part 1 是因为
+「prefix 也能把条件传过去」这句话需要对照组；另外 cross-attn 的条件是显式张量，
+stage7~12 靠它才能 `print(condition.shape)` 看清维度。
+⚠️ 选 prefix 的理由是【真实代码就那么写的】，**不是②在 toy 上跑分更高**——
+单一 seed、这么小的模型不构成效果比较</sub>
+
 **13-6** `generate` 是增量的：每步只把**新 token** 喂进 CosmosReason。
 那它凭什么敢不重算前缀？为什么 K/V 的前缀部分不会因此变掉？
 <sub>考点：因果 mask——位置 j 的 K/V 只依赖 token 0..j，**永远看不到后面的 token**，

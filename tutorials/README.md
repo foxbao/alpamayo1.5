@@ -80,8 +80,8 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 10 | `stage10_text.py` | 文本编码 | 文本 token → embedding → transformer → condition |
 | 11 | `stage11_fusion.py` | 多模态融合 | 三路 token concat + 位置编码，再由 Expert 读取（⚠️ 三路在此为冗余，只演示「怎么合」，不证明「为何必须合」） |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 每路标签/图片上下文化，再 concat |
-| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer **用 KV cache 增量**自回归生成 CoC（**变长，见 EOS 停**）；**Part 2 直接用这份 cache 做 prefix 条件化并对比** |
-| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片拼成**多模态前缀**再生成 CoC，cache 同样直接复用（toy 里最完整的输入侧；与真实的差距见 §六） |
+| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer **用 KV cache 增量**自回归生成 CoC（**变长，见 EOS 停**）。**Part 1 = cross-attn 对照组，Part 2 = prefix 真实做法**，同一个 backbone 并排对照 |
+| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片拼成**多模态前缀**再生成 CoC，cache 直接复用；同样 Part 1 对照组 / Part 2 真实做法（toy 里最完整的输入侧，与真实的差距见 §六） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 条件丢弃训练 + `v=(1-w)·v_uncond + w·v_cond`，w>1 外推向量场 |
 
 **演进脉络（每个 stage 相对上一个改了什么）：**
@@ -262,9 +262,17 @@ toy（两路 · cross-attention）:
 **两者都是合法的 VLA 设计，但 toy 用的不是 Alpamayo 的设计。** 要让 toy 与真实一致，需要：
 ① 层数对上；② **去掉 ExpertBlock 的 cross-attention**，改成与 `CacheBlock` 同类型；③ hidden/heads 对齐。
 
-**stage13/14 的 Part 2 就是这个对照实验**：同一个 backbone 产出的 cache，分别用
-cross-attn（传 hidden 张量）和 prefix（传逐层 K/V）接给 Expert —— 两种方式都能把条件
-传给动作，且 Part 2 里 `step_fn` 的签名上**根本没有 `condition` 参数**。
+**stage13/14 就是这个对照实验**，两侧是【对等的连接拓扑】，不是进阶关系：
+
+| | Part 1【对照组】 | Part 2【真实做法】 |
+|---|---|---|
+| 条件形式 | 显式 hidden 张量 `(B, T, 64)` | VLM 逐层 K/V |
+| 调用 | `expert(emb, condition)` | `expert(emb, caches)`，**签名里没有 `condition`** |
+| 推理代价 | cross-attn 要 hidden → **必须再跑一次完整 forward** | K/V 白拿，无额外 forward |
+| 为什么留着 | 给 Part 2 一个基准；也说明显式条件张量在 stage7~12 更好教 | 真实代码就这么写的 |
+
+⚠️ **选 prefix 的理由是「真实代码就那么写的」，不是它在这个 toy 上跑分更高。**
+单一 seed、这么小的模型说明不了优劣；对照表只回答「两种方式是否都能把条件传过去」。
 
 **② CFG 的无条件分支**：toy 学了一个「空条件 embedding」来表示「无指令」；
 真实代码是**从输入序列里删掉 `<|route_start|>...<|route_end|>` 那一段**（`nav_utils.remove_nav_text`），

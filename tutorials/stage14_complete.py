@@ -8,9 +8,12 @@
     「动作 token 之前的所有内容」都装在同一条序列的逐层 K/V 里
   - 训练同样是 cot_loss + fm_loss 联合，pad 处理同 stage13（ignore_index + attention mask）
 
-★ Part 2 的结构和 stage13 完全一致：generate 用 KV cache 增量生成，
-  prefix 版 Expert 直接复用那份 cache —— 区别只是**前缀是多模态的**（历史 + 视觉）。
-  cache 长度 = 历史 8 + 视觉 17 + <bos> 1 + 生成 6。
+★ 和 stage13 一样分两部分，**Part 1 是对照组、Part 2 是真实做法**（详见 stage13 的说明）：
+  - Part 1【对照组】：cross-attn 条件化，toy 主干 stage4~12 的做法
+  - Part 2【真实做法】：prefix 续写，generate 用 KV cache 增量生成，
+    prefix 版 Expert 直接复用那份 cache —— 区别只是**前缀是多模态的**（历史 + 视觉）。
+    cache 长度 = 历史 8 + 视觉 17 + <bos> 1 + 生成 6。
+  两者是【对等的连接拓扑】，不是「进阶关系」；选 Part 2 的理由是真实代码就那么写的。
 
 【简化】
   - 历史只有 8 步位移增量 (dx,dy)，且是**合成的**（与图片同方向解析生成）；
@@ -302,6 +305,18 @@ if __name__ == "__main__":
     # 真值轨迹：target 是【动作】（曲率），终点 y 要用 action_to_traj 积出来
     GT_TRAJ = ActionSpace().action_to_traj(target)
 
+    # ═══════════════════════════════════════════════════════════════
+    # Part 1：【对照组】—— toy 主干一直用的 cross-attention 条件化
+    # ═══════════════════════════════════════════════════════════════
+    # 先跑这条是为了给 Part 2 一个可比较的基准：同一个 backbone、同一份数据、
+    # 同一个任务，唯一变量是「条件怎么连到 Expert」（详见 stage13 的说明）。
+    print("=" * 70)
+    print("Part 1【对照组】：cross-attention 条件化（toy 主干 stage4~12 的做法）")
+    print("=" * 70)
+    print("  条件是一份【显式的 hidden 张量】(B, T, 64)，用 expert(emb, condition) 传入")
+    print("  → 好处：能直接 print(condition.shape) 看清条件里有什么（stage7~12 就靠这个）")
+    print("  → 代价：cross-attn 要 hidden 而非 K/V，所以推理时必须【再跑一次】完整 forward\n")
+
     model = MiniVLA()
     # lr=5e-4：同 stage13，left/right 推理链共享前缀，地形更陡，1e-3 不稳定
     opt = torch.optim.Adam(model.parameters(), lr=5e-4)
@@ -312,7 +327,7 @@ if __name__ == "__main__":
     for i, c in enumerate(CHAINS):
         print(f"  {['left','right','straight'][i]:9s} {len(c)} 个 token:  {' '.join(VOCAB[t] for t in c)}")
 
-    print("\n训练后：历史 + 图片一起给，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
+    print("\n  对照组的输出：历史 + 图片一起给，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
     names = ["left", "right", "straight"]
     with torch.no_grad():
         for i, name in enumerate(names):
@@ -324,13 +339,15 @@ if __name__ == "__main__":
                   f"终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})  ← 单次采样，方差大")
 
     # ═══════════════════════════════════════════════════════════════
-    # Part 2：换一种「条件化」方式（prefix —— Alpamayo 的真实做法）
+    # Part 2：【Alpamayo 的真实做法】—— prefix 续写（前缀是多模态的）
     # ═══════════════════════════════════════════════════════════════
+    # 和 Part 1 是【两种对等的连接拓扑】，不是「进阶版」。
     print("\n" + "=" * 70)
-    print("Part 2：同一个任务，改用 prefix 方式条件化（前缀是【多模态】的）")
+    print("Part 2【真实做法】：prefix 续写（条件 = VLM 留下的逐层 K/V）")
     print("=" * 70)
-    print("  Part 1 的调法:  expert(emb, condition)   ← 单独传条件张量")
-    print("  Part 2 的调法:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里")
+    print("  Part 1:  expert(emb, condition)   ← 单独传条件张量")
+    print("  Part 2:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里")
+    print("           注意 step_fn 签名里【没有 condition 参数】")
     print("  ★ 前缀 = 历史 token + 视觉 token —— 多个模态拼成一条序列\n")
 
     # ★ 复用 Part 1 的 backbone，只训一个新的 prefix Expert
@@ -356,9 +373,9 @@ if __name__ == "__main__":
     #   只报一个样本会得出「时好时坏」的假结论。采样本身很便宜（10 个小步），
     #   所以这里跑 N_SAMPLES 次取平均再判类。
     N_SAMPLES = 8
-    print(f"\n  两种方式的输出对比（终点 y，各取 {N_SAMPLES} 次采样平均；"
+    print(f"\n  对照结果（终点 y，各取 {N_SAMPLES} 次采样平均；"
           f"真值来自把 target 动作积分成轨迹）：")
-    print(f"  {'':<10}{'① cross-attn':>18}{'② prefix':>18}{'真值':>10}")
+    print(f"  {'':<10}{'① cross-attn(对照)':>20}{'② prefix(真实)':>18}{'真值':>10}")
     gt_all = GT_TRAJ[:, -1, 1]                          # (3,) 三个真值
     # straight 的真值是 0，用「符号相同」判对错是没有意义的。
     # 改成分类口径：预测的 y 最接近哪个真值，就算认成哪一类。
@@ -378,3 +395,7 @@ if __name__ == "__main__":
     print(f"\n  → 6 个预测里 {n_ok} 个分类正确（3 个 mode × 2 种方式）")
     print("  → 同一个 backbone、同一份条件，只是连接方式不同：")
     print("     cross-attn 传 hidden 张量，prefix 传逐层 K/V")
+    print("  → 这里要看的不是分数高低，而是【两种连接拓扑是否都能把条件传到动作】。")
+    print("     两边都对上 → 说明条件传递并不依赖 cross-attn。")
+    print("  → 但这不是「②比①更好」：单一 seed、这么小的模型不构成效果比较；")
+    print("     选 prefix 的理由是【真实代码就那么写的】，不是它在 toy 上跑分更高。")

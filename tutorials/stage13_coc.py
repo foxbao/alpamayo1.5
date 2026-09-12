@@ -23,15 +23,27 @@
     真实 Alpamayo 里两者都存在且角色不同：
         导航指令（输入）→ 影响推理怎么写；CoC 推理（输出）→ 其隐状态影响轨迹怎么出
 
-★ Part 1 / Part 2 是【同一个任务、两种连接方式】的对照实验：
-   Part 1：cross-attn 版 Expert，条件作为独立的 hidden 张量传入。
-           因为 cross-attn 要的是 hidden 而不是 K/V，**必须再跑一次完整 forward**。
-   Part 2：prefix 版 —— **Alpamayo 的真实做法**，
-           直接复用 `generate()` 留下的 cache（里面含 CoC），**不需要额外 forward**，
-           而且 `step_fn` 的签名里根本没有 condition 参数。
-   这正是真实代码的结构：
-       prompt_cache = vlm_outputs.past_key_values     # 生成时留下的缓存
-       expert(..., past_key_values=prompt_cache)      # Expert 直接复用
+★ 本 stage 分两部分，是【同一个 backbone、同一份数据、同一个任务】下的对照实验，
+  唯一变量是「条件怎么连到 Expert」：
+
+   **Part 1【对照组】**：cross-attn 版 Expert，条件作为独立的 hidden 张量传入。
+       这就是 toy 主干 stage4~12 一路用的做法。它放在这里**不是**为了当垫脚石
+       —— 两种连接拓扑是对等的，不存在「①学会了才轮到②」。留着它是为了给
+       Part 2 一个基准：没有基准，「prefix 也能把条件传过去」就没有对照物。
+       注意它的代价：cross-attn 要的是 hidden 而不是 K/V，
+       所以**推理时必须再跑一次完整 forward**（见 `sample` 里的注释）。
+
+   **Part 2【Alpamayo 的真实做法】**：prefix 续写。
+       直接复用 `generate()` 留下的 cache（里面含 CoC），**不需要额外 forward**，
+       而且 `step_fn` 的签名里根本没有 condition 参数。这正是真实代码的结构：
+           prompt_cache = vlm_outputs.past_key_values     # 生成时留下的缓存
+           expert(..., past_key_values=prompt_cache)      # Expert 直接复用
+
+   ⚠️ 选 Part 2 作为真实做法的理由是「**真实代码就那么写的**」
+      （实测真实 Expert 只有 `self_attn + mlp + 2×RMSNorm`，没有 cross-attn），
+      **不是因为②在这个 toy 上跑分比①高**。单一 seed、这么小的模型，
+      说明不了优劣 —— 对照表只回答「两种方式是否都能把条件传过去」。
+
    机制细节与计算量对比见 `exp_kv_cache.py`；KV cache 为什么必需见 `real3_kv_cache.py`。
 
 【简化】
@@ -323,13 +335,27 @@ if __name__ == "__main__":
         print(f"  {['left','right','straight'][i]:9s} {len(c)} 个 token:  {words}")
     print(f"  → 最长 {MAX_LEN}，训练时短的补齐、用 IGNORE_INDEX 不算 loss\n")
 
+    # ═══════════════════════════════════════════════════════════════
+    # Part 1：【对照组】—— toy 主干一直用的 cross-attention 条件化
+    # ═══════════════════════════════════════════════════════════════
+    # 先跑这条，不是为了「一步步进阶到真实做法」，而是为了给 Part 2 一个
+    # 可以比较的基准：**同一个 backbone、同一份数据、同一个任务**，
+    # 唯一变量是「条件怎么连到 Expert」。没有这个基准，
+    # 「prefix 也能把条件传过去」这句话就没有对照物。
+    print("=" * 70)
+    print("Part 1【对照组】：cross-attention 条件化（toy 主干 stage4~12 的做法）")
+    print("=" * 70)
+    print("  条件是一份【显式的 hidden 张量】(B, T, 64)，用 expert(emb, condition) 传入")
+    print("  → 好处：能直接 print(condition.shape) 看清条件里有什么（stage7~12 就靠这个）")
+    print("  → 代价：cross-attn 要 hidden 而非 K/V，所以推理时必须【再跑一次】完整 forward\n")
+
     model = MiniVLA()
     # lr=5e-4：left/right 推理链共享前缀，地形较陡，1e-3 在部分种子上会崩
     opt = torch.optim.Adam(model.parameters(), lr=5e-4)
     train(model, opt, target)
     model.eval()
 
-    print("\n训练后：给一张图，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
+    print("\n  对照组的输出：给一张图，模型自回归【生成】推理（见到 <eos> 停）+ 预测轨迹")
     names = ["left", "right", "straight"]
     with torch.no_grad():
         for i, name in enumerate(names):
@@ -341,13 +367,20 @@ if __name__ == "__main__":
                   f"终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})  ← 单次采样，方差大")
 
     # ═══════════════════════════════════════════════════════════════
-    # Part 2：换一种「条件化」方式（prefix —— Alpamayo 的真实做法）
+    # Part 2：【Alpamayo 的真实做法】—— prefix 续写
     # ═══════════════════════════════════════════════════════════════
+    # 和 Part 1 是【两种对等的连接拓扑】，不是「进阶版」：
+    # Part 1 是两条流用 cross-attn 沟通，Part 2 是一条流靠 self-attn 看前缀。
+    #
+    # 之所以说 Part 2 是真实做法：实测真实 Expert 的子模块只有
+    # `self_attn + mlp + 2×RMSNorm`，**根本没有 cross-attn**，和 VLM 文本塔结构
+    # 完全相同（见 exp_prefix_expert.py / README §六）。
     print("\n" + "=" * 70)
-    print("Part 2：同一个任务，改用 prefix 方式条件化")
+    print("Part 2【真实做法】：prefix 续写（条件就是 VLM 留下的逐层 K/V）")
     print("=" * 70)
-    print("  Part 1 的调法:  expert(emb, condition)   ← 单独传条件张量")
-    print("  Part 2 的调法:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里\n")
+    print("  Part 1:  expert(emb, condition)   ← 单独传条件张量")
+    print("  Part 2:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里")
+    print("           注意 step_fn 签名里【没有 condition 参数】\n")
 
     # ★ 复用 Part 1 的 backbone（ViT + CosmosReason），只训一个新的 prefix Expert
     prefix_model = PrefixMiniVLA(backbone=model)
@@ -372,9 +405,9 @@ if __name__ == "__main__":
     #   只报一个样本会得出「时好时坏」的假结论。采样本身很便宜（10 个小步），
     #   所以这里跑 N_SAMPLES 次取平均再判类。
     N_SAMPLES = 8
-    print(f"\n  两种方式的输出对比（终点 y，各取 {N_SAMPLES} 次采样平均；"
+    print(f"\n  对照结果（终点 y，各取 {N_SAMPLES} 次采样平均；"
           f"真值来自把 target 动作积分成轨迹）：")
-    print(f"  {'':<10}{'① cross-attn':>18}{'② prefix':>18}{'真值':>10}")
+    print(f"  {'':<10}{'① cross-attn(对照)':>20}{'② prefix(真实)':>18}{'真值':>10}")
     gt_all = GT_TRAJ[:, -1, 1]                          # (3,) 三个真值
     # straight 的真值是 0，用「符号相同」判对错是没有意义的。
     # 改成分类口径：预测的 y 最接近哪个真值，就算认成哪一类。
@@ -394,3 +427,7 @@ if __name__ == "__main__":
     print(f"\n  → 6 个预测里 {n_ok} 个分类正确（3 个 mode × 2 种方式）")
     print("  → 两种方式用的是【同一个 backbone、同一份条件】，差别只在连接方式：")
     print("     cross-attn 传 hidden 张量，prefix 传逐层 K/V")
+    print("  → 这里要看的不是分数高低，而是【两种连接拓扑是否都能把条件传到动作】。")
+    print("     两边都对上 → 说明条件传递并不依赖 cross-attn。")
+    print("  → 但这不是「②比①更好」：单一 seed、这么小的模型不构成效果比较；")
+    print("     选 prefix 的理由是【真实代码就那么写的】，不是它在 toy 上跑分更高。")
