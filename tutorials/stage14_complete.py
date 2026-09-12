@@ -278,6 +278,9 @@ def train_prefix(model, backbone, opt, target_actions, n_iters=5000, batch=64):
       梯度等价于 1 个样本）。把 3 个 mode 的 cache 堆成 (3,H,L,D) 再按 mode 索引。
     """
     model.train()
+    # ★ cache 是「算一次、全程复用」的，所以 backbone 必须显式切到 eval
+    #   （`no_grad()` ≠ `eval()`，见 stage13 的同名说明）。
+    backbone.eval()
     # 三个 mode 【一次 batch 生成】：变长的链一起跑到最长的那条，cache 长度天然对齐
     with torch.no_grad():
         text_ids_all, cs_all, masks_all = backbone.generate(HISTORIES, IMAGES)
@@ -397,5 +400,7 @@ if __name__ == "__main__":
     print("     cross-attn 传 hidden 张量，prefix 传逐层 K/V")
     print("  → 这里要看的不是分数高低，而是【两种连接拓扑是否都能把条件传到动作】。")
     print("     两边都对上 → 说明条件传递并不依赖 cross-attn。")
-    print("  → 但这不是「②比①更好」：单一 seed、这么小的模型不构成效果比较；")
-    print("     选 prefix 的理由是【真实代码就那么写的】，不是它在 toy 上跑分更高。")
+    print("  → 但这不是「②比①更好」，理由不是「模型太小」——是**训练制度不对称**：")
+    print("     Part 1 的 fm_loss 会顺着 condition 反传去塑造 backbone，")
+    print("     Part 2 的 backbone 是冻结的（cache 在 no_grad 下预算）。")
+    print("     要做效果比较，得让两边都在冻结 backbone 上训 Expert（详见 stage13 的说明）。")

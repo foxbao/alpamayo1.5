@@ -55,6 +55,20 @@
   - 贪心解码（argmax）；真实用 temperature=0.6 + top_p 采样
   - 没有 <|cot_start|>/<|cot_end|> 等 special token 框架，没有 logits processor
     （真实会屏蔽掉 4000 个离散轨迹 token，避免 CoC 生成到它们）
+  - **Part 2 训练 Expert 用的 cache 来自【模型自己生成】的 CoC**，不是真值 CoC。
+    真实 SFT 是 teacher forcing：序列是 `[prompt, 真值 CoC, action]`，
+    Expert 的 `past_key_values` 来自 VLM 对**真值 CoC** 的 forward；
+    只有推理时才换成生成的 CoC。本 toy 两边都用生成的（好处是 cache 一次算完可复用，
+    代价是 Expert 得适应一个冻结 VLM 实际吐出来的东西，训练更难）。
+    这条差异的后果是：**CoC 生成错了，错误会直接传到动作**，而真实训练里
+    真值 CoC 会把这条错误通路切断。
+  - 两部分的**训练制度不对称**，所以对照表不能当效果比较：
+    Part 1 的 `loss = cot_loss + fm_loss` 一起反传，fm_loss 会顺着 condition
+    **塑造 backbone**；Part 2 的 cache 是 `no_grad` 下预算的、优化器只含 Expert，
+    **backbone 完全冻结**。也就是说 Part 1 的 Expert 有一个「为它适配过」的 backbone。
+    要做效果比较，得让两边都在冻结 backbone 上训 Expert。
+  - 条件里**保留了 `<eos>`**（`_condition_from_hidden` 只去 `<bos>`，`cond_pad_mask`
+    只屏蔽 `<pad>`）。真实代码具体保留/截断哪些 token 需要对着源码确认，别默认。
   - 语义监督是假的：CoC 文本和轨迹方向只是人为配对，**不证明模型真的「按推理行动」**
 """
 
@@ -300,6 +314,12 @@ def train_prefix(model, backbone, opt, target_actions, n_iters=5000, batch=64):
       这样既有混合 batch，又不用重跑 generate。
     """
     model.train()
+    # ★ cache 是「算一次、全程复用」的，所以 backbone 必须显式切到 eval。
+    #   注意 `no_grad()` ≠ `eval()`：前者只关梯度，不影响 Dropout/BatchNorm 的行为。
+    #   `model.train()` 会连 backbone 一起切回 train（它是子模块），
+    #   toy 里没出事只是因为 ViTConfig 的 dropout 默认全 0.0、我们的 block 也没有 dropout。
+    #   一旦有人加了 dropout，这里就会变成「一次随机采样的 K/V 被复用几千次」。
+    backbone.eval()
     # 三个 mode 【一次 batch 生成】：这样变长的三条链会一起跑到最长的那条，
     # cache 长度天然对齐（短的用 <pad> 补齐，靠 mask 屏蔽）。
     with torch.no_grad():
@@ -429,5 +449,8 @@ if __name__ == "__main__":
     print("     cross-attn 传 hidden 张量，prefix 传逐层 K/V")
     print("  → 这里要看的不是分数高低，而是【两种连接拓扑是否都能把条件传到动作】。")
     print("     两边都对上 → 说明条件传递并不依赖 cross-attn。")
-    print("  → 但这不是「②比①更好」：单一 seed、这么小的模型不构成效果比较；")
-    print("     选 prefix 的理由是【真实代码就那么写的】，不是它在 toy 上跑分更高。")
+    print("  → 但这不是「②比①更好」，而且理由不是「模型太小」——是**训练制度不对称**：")
+    print("     Part 1 的 fm_loss 会顺着 condition 反传去塑造 backbone，")
+    print("     Part 2 的 backbone 是冻结的（cache 在 no_grad 下预算）。")
+    print("     也就是说 ① 的 Expert 有一个「为它适配过」的 backbone，本身占便宜。")
+    print("     要做效果比较，得让两边都在冻结 backbone 上训 Expert。")
