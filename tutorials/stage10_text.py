@@ -1,13 +1,26 @@
-"""Stage 10: 补 Language —— 文本指令 → condition
+"""Stage 10: 补 Language —— 文本指令 → condition（输入侧的「L」）
 
-⚠️ 注意：这里的文本是【输入指令】（外部给定的），不是模型生成的推理。
+【目的】理解文本怎么进模型，以及「token id → 词向量 → 上下文化」这条链路：
+  - 迷你词表 + 手写 token id 序列，模拟 tokenizer 的输出
+  - `nn.Embedding`：token id → 词向量 (B, L, HIDDEN)
+  - TransformerEncoder 让 token 互相上下文化（「turn left」≠「left turn」）
+  - **同样必须加位置编码**，否则词序对模型没有意义（同 stage7 的坑）
+  - 模型行为：给一条导航指令，输出对应轨迹
+
+⚠️ 关键区分：这里的文本是【输入指令】（外部给定的），**不是**模型生成的推理。
    真实 Alpamayo 的导航指令长这样（见 notebooks/nav_demo_samples.json）：
        "Turn left in 11m" / "Turn right in 30m" / "Turn left in 4m"
-   本 stage 简化为同样的「动作 + 距离」模式，用词刻意和 stage13 的【生成推理】
-   （shift/left/due/to/curve...）区分开。
+   本 stage 用同样的「动作 + 距离」模式，用词刻意和 stage13 的【生成推理】
+   （shift/left/due/to/curve...）区分开。真实里两者角色不同：
+       导航指令（输入）→ 影响推理【怎么写】；CoC 推理（输出）→ 隐状态影响轨迹【怎么出】
 
-   真实里两者角色不同：
-       导航指令（输入）→ 影响推理怎么写；CoC 推理（输出）→ 隐状态影响轨迹怎么出
+【简化】
+  - 词表只有 8 个词、指令固定 4 个 token；真实词表约 15 万（BPE），
+    导航段是一整段文本，还会被 <|route_start|>...<|route_end|> 包裹
+  - 文本编码器是 2 层随机初始化的 TransformerEncoder + 可学习位置编码；
+    真实是预训练 Cosmos-Reason2 的一部分，位置编码用 RoPE
+  - 三条指令 → 三条固定动作，仍是「记忆」而非语言理解
+  - 没有真正的 tokenizer、没有子词、没有变长 padding
 """
 
 import torch

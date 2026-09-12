@@ -1,4 +1,22 @@
-"""Stage 3: 两个投影 —— 动作→embedding→向量场，引入 Fourier 编码"""
+"""Stage 3: 两个投影 + Fourier 编码 —— 动作与 transformer 之间的「桥」
+
+【目的】理解连续动作 (B,64,2) 怎么进出 transformer：
+  - ActionInProj：噪声动作 x + 时间步 t → (B,64,HIDDEN)，**每个 waypoint 一个 token**
+  - ActionOutProj：(B,64,HIDDEN) → 向量场 (B,64,2)，回到动作空间
+  - Fourier 编码：标量 → [sin(2πf_i·x), cos(2πf_i·x)]，f 对数间隔取 1→100
+    为什么需要：不加编码时 MLP 很难表示高频/周期函数（同 NeRF 的位置编码）
+  - **时间步 t 也必须编码**：否则网络分不清「去噪早期」和「去噪晚期」，
+    而不同 t 该输出的向量场完全不同（t≈0 时几乎是纯噪声，t≈1 时接近数据）
+  - 结尾打印 t=0.0 与 t=0.9 编码的余弦相似度，直观确认 t 被区分开了
+
+【简化】相对 PerWaypointActionInProjV2：
+  - toy 用 3 层 MLP、hidden=64；真实默认 num_enc_layers=4、hidden_size=1024，
+    out_dim 对齐 expert hidden（release 为 2048），实际值由 action_in_proj_cfg 覆盖
+  - Fourier 特征数 16（=8 个频率）；真实默认 num_fourier_feats=20
+  - 真实 MLP 内部用 **RMSNorm**（不是 LayerNorm），归一化位置也略有不同
+  - 这里的 OutProj 是 hidden→hidden→2；真实的 action_out_proj 由配置决定
+  - 两个投影都是【随机初始化且不训练】的（stage6 起才进入训练循环）
+"""
 
 import math
 import torch

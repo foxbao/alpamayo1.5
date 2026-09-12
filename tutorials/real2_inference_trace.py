@@ -1,17 +1,25 @@
 """real2: 真实推理链路 trace（后半段：tokens → VLM → diffusion → 轨迹）
 
-接 real1（前半段：数据 → prompt → tokens）。这一段需要加载 10B 模型（GPU）。
+【目的】接着 real1 的输入侧，看清**动作到底是怎么被算出来的**：
+  不重新实现，直接调用真实的 `sample_trajectories_from_data_with_vlm_rollout`，
+  用轻量插桩（monkey-patch）打印中间步骤：
+    - 模型构成（vlm = 8B VLM、expert = 文本塔、action_space = Unicycle、diffusion = FlowMatching）
+    - 48 个历史占位符（位置 3013~3060）被替换成真实 token id
+    - CoC 生成结束后，<|traj_future_start|> 的下一位（3103）就是 diffusion token 的起点
+    - 扩散采样 (batch_size=1, n_steps=10) → 动作 (1,64,2) → pred_xyz / pred_rot
+  看过这一遍，再回头读 alpamayo1_5.py 的 step_fn 会顺畅很多。
 
-不重新实现——调用真实的 `sample_trajectories_from_data_with_vlm_rollout`，
-并用轻量插桩（monkey-patch）打印中间步骤。
+【前提】需要 GPU + 约 22 GB 模型权重 + HF 访问权限，**明显比 real1 重**：
+    - 必须加载 10B 模型（实测 11.08B 参数），CPU 跑不动
+    - 按机器实际可用 GPU 设置 CUDA_VISIBLE_DEVICES，**不要默认有 GPU 1**，见 RUN_NOTES.md
+  toy 里的对应物是 stage13/14 的 `generate` + diffusion 采样循环（规模小几个数量级）。
+
+【不简化】调用真实的 rollout 接口，只做插桩。
 
 对应真实代码：
   models/alpamayo1_5.py:218  sample_trajectories_from_data_with_vlm_rollout
   models/base_model.py:172   fuse_traj_tokens
   models/alpamayo1_5.py:307  _find_eos_offset
-
-运行：python tutorials/real2_inference_trace.py
-按机器实际可用 GPU 设置 CUDA_VISIBLE_DEVICES，参见 RUN_NOTES.md。
 """
 
 import numpy as np

@@ -1,10 +1,21 @@
 """real3: KV cache 实验 —— 为什么真实代码 prefill 一次就够
 
-本实验比较同一个 cross-attention 缓存/重算条件 K/V 的结果与投影次数。
-它不证明 toy 的 self-attention + cross-attention 与真实 prefix attention 数学等价。
+【目的】亲手验证「缓存与重算输出相同，但代价差很多」这两件事：
+  - 输出数值：同一个 cross-attention，缓存版与重算版的结果在浮点误差内相同
+  - 投影次数：10 步扩散里，条件的 K/V 投影从 **10 次降到 1 次**
+  - 计算量：每步处理的 token 数 前缀+动作(3136) ↔ 只有动作(64)，约 49 倍
+  这解释了真实代码为什么 `prompt_cache = vlm_outputs.past_key_values` 之后
+  就能把 cache 反复交给 expert（alpamayo1_5.py:304 / :349）。
+
+【简化】**纯 CPU 的合成实验**，不是 release 模型测速：
+  - 用一个 toy cross-attention 演示原理，**不证明** toy 的
+    self-attention + cross-attention 与真实 prefix attention 数学等价
+  - 耗时是「无梯度、预热后取三次中位数」，只说明投影次数的差别；
+    真实端到端加速还取决于 attention kernel、缓存布局和硬件
+  - 后半段「只跑动作」**根本没有读前缀 K/V**，所以不能当作缓存分支的精确成本或严格上界
+  - 真实收益的完整讨论见 README §六；stage13/14 的 Part 2 是同一原理的真实接入方式
 
 对应真实代码：models/alpamayo1_5.py:304（prompt_cache）与 :349（past_key_values=prompt_cache）
-纯 CPU，秒级。
 """
 
 import time

@@ -1,4 +1,22 @@
-"""Stage 6: 训练 —— 让 condition 真正控制轨迹（flow matching 训练）"""
+"""Stage 6: 训练 —— 让 condition 真正控制轨迹（flow matching 训练）
+
+【目的】这是主线里第一个【会学习】的 stage，理解 FM 的训练目标本身：
+  - 构造训练对：x_t = (1-t)·x0 + t·x1（x0 噪声、x1 数据），真值速度 v_target = x1 - x0
+  - 损失就是最朴素的 MSE(v_pred, v_target)——没有噪声调度、没有后验采样
+    （对比 DDPM 预测噪声 ε 并注入后验噪声，见 ddpm_1d.py）
+  - 训练/推理必须走同一个 step_fn，形状对齐
+  - 条件用 3 个可学习 Embedding 表示「左/右/直」，看采样终点 y 的符号是否听话
+  - **训练/采样噪声必须对齐**：这里都在标准高斯下，所以采样 temperature=1.0
+
+【简化】
+  - condition 是 `nn.Embedding` 查表 + 广播到 (B,L,H)，没有任何真实输入：
+    没有图、没有历史、没有文本；「指令」只是一个整数下标
+  - 只有 3 条固定指令、目标动作是手工写死的恒定曲率 (0.05/-0.05/0)
+  - 单步预测、无 CFG、无 EMA、无 lr 调度；3000 步能在 CPU 上跑完
+  - 真实训练目标还包括 CoC 的语言建模损失（见 stage13 的 cot_loss + fm_loss）
+  - Expert 仍是 cross-attention 版（真实为 prefix，见 stage4 / exp_prefix_expert.py）
+  注意：单输出 MSE 只会拟合条件均值，无法表达多峰——见 stage8。
+"""
 
 import torch
 import torch.nn as nn

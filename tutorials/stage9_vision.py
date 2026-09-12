@@ -1,3 +1,23 @@
+"""Stage 9: 视觉编码 —— 补上 VLA 的「V」，图 → visual tokens → condition
+
+【目的】理解视觉是怎么进模型的：
+  - 图 → ViT → (B, 1+16, HIDDEN)：**1 个 CLS token + 16 个 patch token**
+    视觉不是被「压成一个向量」，而是展开成一条 token 序列 —— 这样才能
+    和文本 / 历史 token 拼在一起进 transformer
+  - 这 17 个 visual token 直接当 condition 喂给 Expert
+  - 模型行为：给一张「车道线」图，读出方向并预测轨迹
+  - 顺带看到 patch 化的代价：16×16 的图切成 4×4 的 patch 只剩 16 个 token
+
+【简化】
+  - 图片是 16×16 **单通道合成灰度图**（画一条斜/直线表示左弯/右弯/直行）；
+    真实是 1920×1080 RGB 多相机，且受 min_pixels/max_pixels 约束
+  - ViT 是 `ViTConfig` 随机初始化（4 层、hidden 64），**不下载预训练权重**；
+    真实 Cosmos-Reason2 的视觉塔是预训练的，且和 LLM 联合训练
+  - 只有 1 个相机、1 帧；真实是多相机（4~8 路）× 多帧（每路 4 帧）
+  - 没有相机名文字标签（stage12 才加），也没有位置/外参输入
+  - 训练数据只有 3 张固定图 → 3 条固定动作，是「记忆」而非泛化
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

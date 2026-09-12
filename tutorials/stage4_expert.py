@@ -1,24 +1,35 @@
 """Stage 4: 条件化 —— 两种做法，同一个目标
 
-目标：让「动作」依赖「条件」。有两种实现方式，本 stage 两个都写、都跑、对比：
+【目的】让「动作」依赖「条件」（这是 VLA 之所以是 VLA 的地方）。
+  本 stage 把两种实现方式都写出来、都跑通、并排对比：
 
     ① cross-attention（通用做法）
        动作 token ──► [Expert] ──┐
                                  ├─ cross_attn 连接两路
        条件 (B,L,H) ─────────────┘
-       → 广泛使用：Stable Diffusion 的文本条件、原始 Transformer 的 decoder
+       → 广泛使用：Stable Diffusion 的文本条件、原始 Transformer decoder
+       → 要额外注意 self-attn 是【非因果】的：64 个 waypoint 互相可见
+         （轨迹是一个整体，不像 LLM 从左到右生成）
 
     ② prefix 续写（**Alpamayo 的真实做法**）
        VLM 的逐层 K/V（cache）┐
                               ├─► 拼成【一条序列】──► [Expert] ──► 输出
        动作 token ────────────┘
        → Expert 和 VLM 文本塔【结构完全相同】，没有 cross-attention
-       → 条件通过 cache 传递，没有单独的 condition 参数
+       → 条件通过 cache 传递，`expert(emb, caches)` 里**没有 condition 参数**
+       → 实测依据：真实 Expert 第 0 层只有 `self_attn + mlp + 2×RMSNorm`，
+         与 VLM 文本塔第 0 层一模一样，看不到任何 cross-attention 模块
 
-实测依据：真实 Expert 的第 0 层是 `self_attn + mlp + 2×RMSNorm`，
-和 VLM 文本塔的第 0 层一模一样，看不到任何 cross-attention 模块。
+  两者的差别不是「换了一种 attention」，而是「完全不同的连接方式」：
+  一个靠 cross-attn 沟通两条数据流，一个靠 self-attn 看前缀。
+  **两者都合法，但 toy 主线用的 ① 不是 Alpamayo 的设计。**
 
-详见 `exp_prefix_expert.py`（把 ② 训练到收敛）和 README §六。
+【简化】
+  - 两种 Expert 都只有 2 层、hidden=64；真实是 30+ 层、hidden=2048
+  - ① 用 PyTorch 的 nn.MultiheadAttention；真实 Expert 是 Qwen3 文本塔 + RoPE
+  - ② 的前缀只有 4 个 token，且用一个 (B,64) 向量「假装」条件；真实前缀数千个位置
+  - ② 手写了 attention 只为暴露 cache；真实依赖 Transformers 的 Cache 对象
+  - 本 stage 只做前向对比，不训练（训练见 stage6；② 训练到收敛见 exp_prefix_expert.py）
 """
 
 import math

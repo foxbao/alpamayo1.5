@@ -1,8 +1,9 @@
 """exp: Prefix 版 Expert —— Alpamayo 真实用的「条件化」方式
 
-对比 toy 的 cross-attention 版（stage4~15 用的）：
+【目的】把 toy 的 cross-attention 换成**真实的连接方式**，并证明它「能训得动」：
+  对比两种条件化（stage4 只做了前向对比，这里把 prefix 版训练到收敛）：
 
-    toy（两路 · cross-attention）:
+    toy（两路 · cross-attention，stage4~15 用的）:
         动作 token ──► [Expert] ──┐
                                   ├─ cross-attn 连接两路
         条件 (B,L,64) ────────────┘
@@ -12,11 +13,21 @@
                                ├─► 拼成【一条序列】──► [Expert] ──► 输出
         动作 token ────────────┘
 
-实测依据（`Qwen3VLTextModel` 第 0 层）：真实 Expert 只有
-`self_attn + mlp + 2×RMSNorm`——**没有 cross-attention**，和 VLM 文本塔结构完全相同。
+  要看清的三个要点：
+    - Expert 的 forward 里**根本没有 condition 参数** —— 条件完全从 cache 来
+    - 所以 Expert 和 VLM **必须是同一种 block、同层数**，否则 cache 接不上
+    - 实测依据（`Qwen3VLTextModel` 第 0 层）：真实 Expert 只有
+      `self_attn + mlp + 2×RMSNorm`——**没有 cross-attention**，和 VLM 文本塔结构完全相同
+  和 stage6 是同一个任务（3 个条件 → 3 条轨迹），可直接对照收敛结果。
 
-本实验：用同一个架构实现 prefix 版，并训练到能收敛（任务同 stage6）。
-纯 CPU，几十秒。
+【简化】
+  - 前缀只有 2 个 token、3 个条件（真实前缀数千个位置、含视觉与 CoC）
+  - backbone 随机初始化、3 层、hidden 64；真实是预训练 Cosmos-Reason2-8B（30+ 层）
+  - 没有视觉/文本输入，条件是一个可学习 Embedding —— 只聚焦「连接方式」本身
+  - 因此「能收敛」只说明这个连接方式没问题，**不代表** prefix 优于 cross-attn
+    或能达到真实模型的精度
+
+【前提】纯 CPU，几十秒。不属于 stage 主线，默认不纳入回归测试。
 """
 
 import math

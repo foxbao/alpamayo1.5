@@ -1,12 +1,23 @@
 """real1: 真实推理链路 trace（前半段：数据 → 坐标 → prompt → tokens）
 
-不重新实现任何东西——只把真实链路跑一遍，把每一步的中间结果打出来，
-让你看清「真实的输入契约」到底长什么样。
+【目的】看清「真实的输入契约」到底长什么样 —— 这是 toy 之后最该先补的一课。
+  做法是**不重新实现任何东西**，只把真实链路跑一遍并打印每一步中间结果：
+    - 一条 clip 如何变成 (token 序列, 坐标, 时间戳)
+    - tokenizer 的构建【顺序】为什么关键：先加 traj_vocab_size 个离散 token
+      <i0>..<i3999>，再加 special tokens —— 漏掉顺序 token id 会差 4000
+    - 序列里视觉 token 占多大比例（实测约 93%）
+    - 历史轨迹是 48 个 <|traj_history|> 占位符，等着被真实 token id 替换
+  这是整条链路的前半段；后半段（tokens → VLM → diffusion → 轨迹）见 real2。
+
+【前提】纯 CPU、**不需要**加载 10B 模型，但需要：
+    - HuggingFace 访问（下载 Qwen processor / tokenizer）
+    - gated 数据集的访问权限（本脚本写死的 CLIP_ID 属于 physical-ai-av）
+
+【不简化】直接调用 release 的真实实现，不替换任何模块，只是原链路上的一层打印插桩。
 
 对应真实代码：
   load_physical_aiavdataset.py:27  load_physical_aiavdataset
   helper.py:77                     create_message
-纯 CPU，不需要加载 10B 模型。
 """
 
 import torch

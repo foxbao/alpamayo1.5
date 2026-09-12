@@ -1,15 +1,26 @@
 """real4: 轨迹几何 round-trip —— 连续 vs 离散，误差各有多大？
 
-用【真实的】动作空间和 tokenizer（从 release config 实例化）做两件事：
-  ① 连续 round-trip：轨迹 → (加速度,曲率) → 轨迹      ← 测最小二乘反解精度
-  ② 量化 round-trip：轨迹 → tokens → 轨迹             ← 再加量化误差
-并对比：量化到底损失了多少？
+【目的】量化「轨迹 ⇄ 动作/离散 token」这条双向路的精度损失，用【真实的】
+  动作空间和 tokenizer（从 release config 实例化）做两次 round-trip：
+    ① 连续 round-trip：轨迹 → (加速度, 曲率) → 轨迹   ← 测带正则的最小二乘反解精度
+    ② 量化 round-trip：轨迹 → tokens → 轨迹           ← 在此基础上再加量化误差
+  顺带解开一个符号之谜：**tokens_per_future_traj = 128 = 64 waypoints × 2 (accel, κ)**，
+  历史则是 48 = 16 位姿 × 3 (xyz)。
+
+【简化 / 结论边界】**用的是真实模块，但结论不能外推**：
+  - 实测这条 clip 的量化 round-trip 误差只略增（mean 0.0344 → 0.0360 m），
+    但**不代表所有轨迹的量化损失都是 5%**——这是 n=1 的单条样本
+  - 脚本另外报告「两种重建之间的距离」；误差之差可能受两者偏差相互抵消影响
+  - 连续 round-trip 本身包含反解正则与积分误差，**不能凭它推断训练流程**，
+    也不能把量化误差与模型预测精度等同起来
+  - 输入的轨迹来自真实数据，但这仍不是一个「模型精度」实验
+
+【前提】纯 CPU、秒级，但需要 HF 访问以下载 release config + tokenizer。
 
 对应真实代码：
   action_space/unicycle_accel_curvature.py:234  traj_to_action（带正则的最小二乘反解）
   action_space/unicycle_accel_curvature.py:307  action_to_traj（积分）
   action_space/discrete_action_space.py:47      DiscreteTrajectoryTokenizer.encode
-纯 CPU，秒级。
 """
 
 import json

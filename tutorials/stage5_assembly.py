@@ -1,8 +1,18 @@
 """Stage 5: 组装完整 MiniVLA（整合 stage1~4），跑端到端闭环
 
-教学近似：Expert 用**显式 cross-attention** 读 condition；
-真实代码是把 VLM 的 **KV cache** 直接当 expert 的 past_key_values
-两者都实现条件化，但 attention 结构不等价。详见 README 的「Toy → Real 对照」。
+【目的】把前四步的零件拼成一个能跑的模型，看清**模块之间的接口**：
+  - ActionSpace(stage1) + FlowMatching(stage2) + 投影(stage3) + Expert(stage4)
+  - `MiniVLA.sample` 三行：算条件 → 扩散采样 → 动作转轨迹
+  - 到这里为止所有零件都是自己写的、自包含的（stage6 起抽出 common.py 复用）
+  跑通的意义是：接口对了，后面每个 stage 只替换其中一块（条件从哪来）。
+
+【简化】
+  - `mock_vlm` 返回 `torch.randn` —— **条件完全是随机的，与图/历史无关**，
+    所以这个模型学不到任何东西，轨迹也不指向任何方向（只是形状对）
+  - Expert 用**显式 cross-attention** 读 condition 张量；
+    真实是把 VLM 的 KV cache 直接当 expert 的 `past_key_values`（见 stage4 对比）
+  - 固定 batch、无训练、无条件序列的位置编码以外的任何真实化处理
+  详见 README §六「Toy → Real 对照」。
 """
 
 import math

@@ -1,3 +1,21 @@
+"""Stage 0: 骨架 —— 先把「模块接口 + 数据流」钉死，再往里填实现
+
+【目的】建立 VLA 的整体心智模型，本 stage **不做任何真实计算**，只跑通形状：
+    ① 条件先行：VLM(图 + 历史) → 条件隐状态 (B, 32, 64)
+    ② 扩散采样：噪声 x ─in_proj→ Expert(读条件) ─out_proj→ 向量场 v ─dt·v→ x
+    ③ 动作→轨迹：action (B,64,2) → traj (B,64,3)
+  核心只有 `MiniVLA.sample` 的三行，以及每个张量的形状约定。
+  重点记住「三个 64」：64 个 waypoint（时间轴）、HIDDEN=64（特征轴）——两者巧合同值。
+
+【简化】6 个模块全是【空壳】，forward 一律返回 zeros/随机张量：
+  - VLM 不读图、不读历史，直接返回 zeros(B, 32, 64)
+  - Expert 不做 attention，ActionInProj/OutProj 也返回 zeros
+  - ActionSpace.action_to_traj 返回全零轨迹（积分逻辑 stage1 才补）
+  - FlowMatching 的 10 步循环是真的，但 step_fn 是假的，所以「采样」不出任何东西
+  - batch / 序列长度 / 维度全是写死的全局常量，**只支持固定 batch**
+  真实 release 是 8B VLM + 独立 expert 去噪器 + Unicycle 动作空间，见 README §六。
+"""
+
 import torch
 import torch.nn as nn
 

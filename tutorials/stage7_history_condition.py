@@ -1,3 +1,21 @@
+"""Stage 7: 序列编码条件 —— condition 从【历史轨迹】里读出来
+
+【目的】把 condition 从「查表」换成「真编码一段序列」，逼近真实 VLM 的角色：
+  - 条件不再由整数下标查表得到，而是 ConditionEncoder 编码 (B, H, 2) 的历史轨迹
+  - 这是主线里第一次让 condition「由数据算出」，而不是一个自由参数
+  - 关键细节：`nn.TransformerEncoder` **不含位置编码**，必须自己加；
+    否则「先左后右」和「先右后左」对模型完全一样（序列退化成一个集合）
+  - 模型行为：给一段历史，自己推断未来方向（历史左转 → 未来也左转）
+
+【简化】
+  - 历史只有 16 步的 (dx, dy) **位移增量**；真实是 48 个 token（16 个位姿 × 3 维 xyz）
+  - ConditionEncoder 是 2 层 TransformerEncoder，用**可学习位置编码**；
+    真实 VLM 是 30+ 层的预训练 Cosmos-Reason2，位置编码用 RoPE
+  - 历史是【合成】的（按固定曲率解析生成，无噪声、无传感器误差）
+  - 条件序列长度 = 历史长度，没有图 / 文本 / CoC；也没有「真正的 V」和「L」
+  - 仍是 cross-attention 版 Expert、固定 batch、单步预测
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
