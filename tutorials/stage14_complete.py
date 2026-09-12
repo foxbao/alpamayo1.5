@@ -12,8 +12,8 @@ import torch.nn.functional as F
 
 from common import (
     ActionSpace, FlowMatching, ActionInProj, ActionOutProj, CrossAttnExpert,
-    N_WAYPOINTS, ACTION_DIM,
-    build_vit, make_causal_mask, CosmosReason, HistoryEncoder,
+    N_WAYPOINTS, ACTION_DIM, HIDDEN,
+    build_vit, make_causal_mask, CosmosReason, HistoryEncoder, CacheStack,
 )
 
 KAPPA = 0.1
@@ -182,6 +182,62 @@ def train(model, opt, target_actions, n_iters=5000, batch=64):
             print(f"iter {it:4d}  cot_loss={cot_loss.item():.4f}  fm_loss={fm_loss.item():.4f}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# Part 2：换一种「条件化」方式 —— prefix（Alpamayo 的真实做法）
+# ═══════════════════════════════════════════════════════════════
+
+class PrefixMiniVLA(nn.Module):
+    """同 stage13 的 Part 2，但**前缀是多模态的**：历史 token + 视觉 token。
+
+    这正是真实里 `past_key_values` 装的东西 —— 「动作之前的所有内容」，
+    可以包含任意长度、任意模态。注意 `step_fn` 里【没有 condition 参数】。
+    """
+
+    def __init__(self, n_layers=3):
+        super().__init__()
+        self.hist_enc = HistoryEncoder()
+        self.vit = build_vit()
+        self.vlm = CacheStack(n_layers=n_layers)      # 编码前缀 → 产 cache
+        self.expert = CacheStack(n_layers=n_layers)   # 同结构 → 能接 cache
+        self.in_proj = ActionInProj()
+        self.out_proj = ActionOutProj()
+        self.action_space = ActionSpace()
+        self.fm = FlowMatching()
+
+    def build_caches(self, hist, img):
+        h = self.hist_enc(hist)                       # (B, HIST_LEN, HIDDEN)
+        v = self.vit(img).last_hidden_state           # (B, 17, HIDDEN)
+        prefix = torch.cat([h, v], dim=1)             # ← 多模态前缀 (B, 8+17, HIDDEN)
+        _, caches = self.vlm(prefix, causal=True)     # ← 逐层 K/V
+        return caches, prefix.shape[1]
+
+    def step_fn(self, x, t, caches):
+        emb = self.in_proj(x, t)
+        h, _ = self.expert(emb, caches=caches, causal=False)   # ← 没有 condition
+        return self.out_proj(h)
+
+    def sample(self, hist, img):
+        caches, _ = self.build_caches(hist, img)
+        action = self.fm.sample(lambda x, t: self.step_fn(x, t, caches),
+                                batch_size=hist.shape[0])
+        return self.action_space.action_to_traj(action)
+
+
+def train_prefix(model, opt, target_actions, n_iters=2000, batch=64):
+    model.train()
+    for it in range(n_iters):
+        mode = torch.randint(0, 3, (batch,))
+        caches, _ = model.build_caches(HISTORIES[mode], IMAGES[mode])
+        x1 = target_actions[mode]
+        x0 = torch.randn(batch, N_WAYPOINTS, ACTION_DIM)
+        t = torch.rand(batch)
+        x_t = (1 - t[:, None, None]) * x0 + t[:, None, None] * x1
+        loss = F.mse_loss(model.step_fn(x_t, t, caches), x1 - x0)
+        opt.zero_grad(); loss.backward(); opt.step()
+        if it % 400 == 0:
+            print(f"  iter {it:4d}  loss={loss.item():.4f}")
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     target = torch.zeros(3, N_WAYPOINTS, ACTION_DIM)
@@ -208,3 +264,35 @@ if __name__ == "__main__":
             n_gen = len(text_ids[0]) - 1                  # 去掉 <bos>
             end = traj[0, -1, :2]
             print(f"  {name:9s} 生成 {n_gen} 个 token: {' '.join(words):<40} 终点(x,y)=({end[0]:6.2f}, {end[1]:6.2f})")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Part 2：换一种「条件化」方式（prefix —— Alpamayo 的真实做法）
+    # ═══════════════════════════════════════════════════════════════
+    print("\n" + "=" * 70)
+    print("Part 2：同一个任务，改用 prefix 方式条件化（前缀是【多模态】的）")
+    print("=" * 70)
+    print("  Part 1 的调法:  expert(emb, condition)   ← 单独传条件张量")
+    print("  Part 2 的调法:  expert(emb, caches)      ← 条件在 VLM 的逐层 K/V 里")
+    print("  ★ 前缀 = 历史 token + 视觉 token —— 多个模态拼成一条序列\n")
+
+    prefix_model = PrefixMiniVLA()
+    opt2 = torch.optim.Adam(prefix_model.parameters(), lr=5e-4)
+    train_prefix(prefix_model, opt2, target)
+    prefix_model.eval()
+
+    print("\n  前缀结构（这就是真实 past_key_values 装的东西）：")
+    with torch.no_grad():
+        cs, plen = prefix_model.build_caches(HISTORIES[0:1], IMAGES[0:1])
+    print(f"    前缀长度 = {plen}  （历史 {HIST_LEN} + 视觉 17）")
+    for i, (k, v) in enumerate(cs):
+        print(f"    layer {i}: K{tuple(k.shape)}  V{tuple(v.shape)}")
+
+    print("\n  两种方式的输出对比：")
+    print(f"  {'':<10}{'① cross-attn':>18}{'② prefix':>18}")
+    with torch.no_grad():
+        for i, name in enumerate(names):
+            traj_a, _ = model.sample(HISTORIES[i:i + 1], IMAGES[i:i + 1])
+            traj_b = prefix_model.sample(HISTORIES[i:i + 1], IMAGES[i:i + 1])
+            ya, yb = traj_a[0, -1, 1].item(), traj_b[0, -1, 1].item()
+            print(f"  {name:<10}{ya:>+16.2f}{yb:>+18.2f}")
+    print("\n  → 两种连接方式都能把条件传给动作")
