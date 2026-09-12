@@ -205,6 +205,17 @@
 <sub>考点：① 是 `step_fn(x, t)` 用 `self.condition`；② 是 `step_fn(x, t, caches)`。
 说明条件在 ② 里【完全通过 cache 传递】，没有单独的 condition 张量</sub>
 
+**13-6** `generate` 是增量的：每步只把**新 token** 喂进 CosmosReason。
+那它凭什么敢不重算前缀？为什么 K/V 的前缀部分不会因此变掉？
+<sub>考点：因果 mask——位置 j 的 K/V 只依赖 token 0..j，**永远看不到后面的 token**，
+所以后面追加多少 token 都不影响已算好的 K/V。这正是「能 cache」的全部理由</sub>
+
+**13-7** 变长生成会给已结束的样本补 `<pad>`，这些 `<pad>` 也进了 cache（成为 Expert 的前缀）。
+Part 1 用什么屏蔽？Part 2 呢？
+<sub>考点：Part 1 是 `cond_pad_mask` → cross-attn 的 `key_padding_mask`；
+Part 2 是 `cache_pad_mask` → attention 里 `masked_fill(-inf)`。
+**同一个问题的两个位置**（条件张量侧 / 前缀 K/V 侧），都不能靠 IGNORE_INDEX 解决</sub>
+
 ## Stage 14 — 完整输入
 
 **14-1** stage14 比 stage13 多了什么？为什么这个「多」很重要？
@@ -378,14 +389,18 @@ cross-attention：query=动作 token，key/value=**条件 token**。
 
 ## Stage 13 — 自回归 CoC 生成
 
+> 这一段是最早的版本，完整的问题见文件开头的 13-1 ~ 13-7（含变长、pad 屏蔽、
+> KV cache 增量生成、Part 2 的 prefix 对比）。下面只保留仍未过时的两条。
+
 **13-1** 训练时和推理时，condition 的长度一致吗？
-<sub>考点：曾经不一致（3 vs 4），已修为都用「推理前缀去 bos」= 2</sub>
+<sub>考点：必须一致，否则 Expert 见到的输入分布不同；推理时把生成结果【补齐到定长】
+再算 condition（Part 1 走这条路；Part 2 用 cache，长度天然由生成过程决定）</sub>
 
 **13-2** 什么是 teacher forcing？它和「自回归生成」是什么关系？
-<sub>考点：训练=并行喂真值前缀；推理=串行一个个生成。任务是同一个</sub>
-
-**13-3** `generate` 里为什么要 `text_ids[:, :-1]` 而不是直接用 `text_ids`？
-<sub>考点：让推理的输入与训练的输入对齐（都去掉末尾的 eos）</sub>
+<sub>考点：训练=并行喂真值前缀；推理=串行一个个生成。任务是同一个。
+注意 `[<bos>, r1, ..., r_{n-1}]` 这种「整条前缀一次喂进去」的写法只出现在
+训练（teacher forcing）和 Part 1 补跑拿 hidden 的那次 forward 里；
+`generate` 本身是增量的，每步只喂【新 token】</sub>
 
 ---
 
@@ -708,14 +723,18 @@ cross-attention：query=动作 token，key/value=**条件 token**。
 
 ## Stage 13 — 自回归 CoC 生成
 
+> 这一段是最早的版本，完整的问题见文件开头的 13-1 ~ 13-7（含变长、pad 屏蔽、
+> KV cache 增量生成、Part 2 的 prefix 对比）。下面只保留仍未过时的两条。
+
 **13-1** 训练时和推理时，condition 的长度一致吗？
-<sub>考点：曾经不一致（3 vs 4），已修为都用「推理前缀去 bos」= 2</sub>
+<sub>考点：必须一致，否则 Expert 见到的输入分布不同；推理时把生成结果【补齐到定长】
+再算 condition（Part 1 走这条路；Part 2 用 cache，长度天然由生成过程决定）</sub>
 
 **13-2** 什么是 teacher forcing？它和「自回归生成」是什么关系？
-<sub>考点：训练=并行喂真值前缀；推理=串行一个个生成。任务是同一个</sub>
-
-**13-3** `generate` 里为什么要 `text_ids[:, :-1]` 而不是直接用 `text_ids`？
-<sub>考点：让推理的输入与训练的输入对齐（都去掉末尾的 eos）</sub>
+<sub>考点：训练=并行喂真值前缀；推理=串行一个个生成。任务是同一个。
+注意 `[<bos>, r1, ..., r_{n-1}]` 这种「整条前缀一次喂进去」的写法只出现在
+训练（teacher forcing）和 Part 1 补跑拿 hidden 的那次 forward 里；
+`generate` 本身是增量的，每步只喂【新 token】</sub>
 
 ---
 

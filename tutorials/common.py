@@ -11,10 +11,21 @@
 """
 
 import math
+import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import ViTConfig, ViTModel
+
+# ---- 线程数：小张量下多线程是【负优化】，这里显式设成 8 ----
+# 实测（stage13 一个训练步，batch=64、hidden=64，56 核机器）：
+#     1 线程 181ms | 8 线程 65ms | 16 线程 67ms | 56 线程（默认）84ms
+# 张量最大只有 64×64×64，单个算子的计算量是微秒级；默认开 56 个线程时，
+# 线程同步的开销超过了收益（`time` 里 user 时间是 real 时间的 50 多倍就是这个原因）。
+# 需要覆盖时设环境变量 TUTORIAL_NUM_THREADS。
+# 注：tests/test_tutorials.py 有 autouse fixture 会临时设成 1（为了确定性），不冲突。
+torch.set_num_threads(int(os.environ.get("TUTORIAL_NUM_THREADS", "8")))
 
 N_WAYPOINTS = 64
 ACTION_DIM = 2
@@ -181,12 +192,14 @@ class CacheBlock(nn.Module):
             nn.Linear(hidden, 4 * hidden), nn.SiLU(), nn.Linear(4 * hidden, hidden)
         )
 
-    def forward(self, x, cache=None, causal=True):
+    def forward(self, x, cache=None, causal=True, cache_pad_mask=None):
         """x: (B, T, H)；cache: (k_prev, v_prev) 或 None。
 
         causal=True  → 序列内部因果（VLM 生成时用）
         causal=False → 全可见（Expert 里动作 token 之间用，对应真实的
                        `expert_non_causal_attention=True`）
+        cache_pad_mask: (B, L_prefix) bool，True = 该前缀位置是 <pad>，要屏蔽。
+                        （变长生成会给已结束的样本补 <pad>，这些位置也进了 cache。）
         """
         B, T, _ = x.shape
         h = self.ln1(x)
@@ -199,8 +212,16 @@ class CacheBlock(nn.Module):
         new_cache = (k, v)
 
         attn = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
+        if cache_pad_mask is not None:
+            # 和 Part 1 的 cond_pad_mask 是同一件事：ignore_index 只管 loss，
+            # 要真屏蔽掉 <pad> 必须在 attention 层动手。
+            pad = cache_pad_mask
+            if pad.shape[1] < k.shape[2]:           # 补上「自己的 token」（永不被屏蔽）
+                pad = F.pad(pad, (0, k.shape[2] - pad.shape[1]), value=False)
+            attn = attn.masked_fill(pad[:, None, None, :], float("-inf"))
         if causal:
-            attn = attn + torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+            neg_inf = torch.full((T, T), float("-inf"), device=x.device, dtype=attn.dtype)
+            attn = attn + torch.triu(neg_inf, diagonal=1)
         attn = torch.softmax(attn, dim=-1)
         x = x + self.proj((attn @ v).transpose(1, 2).reshape(B, T, -1))
         x = x + self.ffn(self.ln2(x))
@@ -214,10 +235,11 @@ class CacheStack(nn.Module):
         super().__init__()
         self.blocks = nn.ModuleList([CacheBlock(hidden) for _ in range(n_layers)])
 
-    def forward(self, x, caches=None, causal=True):
+    def forward(self, x, caches=None, causal=True, cache_pad_mask=None):
         new_caches = []
         for i, blk in enumerate(self.blocks):
-            x, c = blk(x, None if caches is None else caches[i], causal=causal)
+            x, c = blk(x, None if caches is None else caches[i],
+                       causal=causal, cache_pad_mask=cache_pad_mask)
             new_caches.append(c)
         return x, new_caches
 
@@ -243,11 +265,8 @@ class HistoryEncoder(nn.Module):
 
 
 # ---- 因果 transformer（stage13 的 Cosmos-Reason）----
-def make_causal_mask(L):
-    """因果 mask：位置 i 只能看 0..i（下三角=0，上三角=-inf）。"""
-    return torch.triu(torch.full((L, L), float("-inf")), diagonal=1)
-
-
+# 注：因果 mask 现在由 CacheBlock 内部按 `causal=True` 直接构造（下三角=0、上三角=-inf），
+# 所以不再需要单独的 make_causal_mask 辅助函数。
 class CausalBlock(nn.Module):
     def __init__(self, hidden=HIDDEN, n_heads=4):
         super().__init__()
@@ -265,22 +284,50 @@ class CausalBlock(nn.Module):
 
 
 class CosmosReason(nn.Module):
-    """迷你 Cosmos-Reason：因果 transformer，自回归生成推理。"""
+    """迷你 Cosmos-Reason：因果 transformer，自回归生成推理。
+
+    ★ 支持 **KV cache**：blocks 用 CacheBlock，forward 返回 `(h, caches)`。
+      这样有两个好处（和真实一致）：
+        ① 生成时每步只算【新 token】，不重算整条前缀；
+        ② 产出的 cache 可以直接交给 prefix 版 Expert
+           —— 真实代码就是 `expert(past_key_values=prompt_cache)`。
+
+    注：因此它的层数/结构必须和 prefix 版 Expert（CacheStack）一致，cache 才能对接。
+    """
+
     def __init__(self, vocab_size, hidden=HIDDEN, n_blocks=3, max_len=128):
         super().__init__()
         self.text_embed = nn.Embedding(vocab_size, hidden)
         self.pos_embed = nn.Parameter(torch.empty(1, max_len, hidden))
         nn.init.normal_(self.pos_embed, std=0.02)
-        self.blocks = nn.ModuleList([CausalBlock(hidden) for _ in range(n_blocks)])
+        self.blocks = nn.ModuleList([CacheBlock(hidden) for _ in range(n_blocks)])
         self.head = nn.Linear(hidden, vocab_size)
 
-    def forward(self, input_embeds, text_ids, mask):
-        text = self.text_embed(text_ids)              # (B, L, H)
-        x = torch.cat([input_embeds, text], dim=1)    # (B, N+L, H)
-        if x.shape[1] > self.pos_embed.shape[1]:
+    def forward(self, prefix_embeds, text_ids, caches=None):
+        """prefix_embeds: (B, Lp, H) 前缀（视觉 / 历史等）
+        text_ids:      (B, T)      文本 token（完整序列，或【只有新增的】）
+        caches:        None → 从头开始（需要 causal mask）；
+                       否则接在已有 cache 后面（此时 T=1，无需 mask）
+
+        返回 `(h, new_caches)`。
+        """
+        text = self.text_embed(text_ids)              # (B, T, H)
+        if caches is None:
+            x = torch.cat([prefix_embeds, text], dim=1)    # (B, Lp+T, H)
+            pos_start = 0
+            causal = x.shape[1] > 1                        # 多 token 才需要 mask
+        else:
+            x = text                                       # ← 只处理新 token
+            pos_start = caches[0][0].shape[2]              # 已缓存的位置数
+            causal = False                                 # T=1 → 无 mask 需求
+
+        if pos_start + x.shape[1] > self.pos_embed.shape[1]:
             raise ValueError("Input sequence exceeds CosmosReason max_len")
-        # 全序列共享绝对位置；causal mask 控制可见性，位置编码标识历史/图像/文本的位置。
-        x = x + self.pos_embed[:, :x.shape[1]]
-        for blk in self.blocks:
-            x = blk(x, mask)
-        return x
+        # 全序列共享绝对位置；位置编码标识历史/图像/文本的位置。
+        x = x + self.pos_embed[:, pos_start : pos_start + x.shape[1]]
+
+        new_caches = []
+        for i, blk in enumerate(self.blocks):
+            x, c = blk(x, (caches[i] if caches is not None else None), causal=causal)
+            new_caches.append(c)
+        return x, new_caches

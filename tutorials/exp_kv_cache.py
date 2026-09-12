@@ -1,18 +1,25 @@
-"""exp: KV cache —— 自回归生成时，为什么不用重算前面所有 token？
+"""exp: KV cache —— 自回归生成时，为什么不用重算前面所有 token？（读 stage13 之后做）
 
-配合 stage13 看。背景：stage13 的 `generate` 每一步都把**整条前缀**重新喂给
-CosmosReason（toy 没有 KV cache）。而真实代码不是这么做的：
+【目的】把「为什么能复用 cache」这件事亲手验一遍，而不是只信结论：
+  用一个极小的因果语言模型对比两种生成方式：
+    A) 每步重算整条前缀              —— 直觉做法（stage13 的早期版本）
+    B) 每步只算新 token + 复用 cache —— 真实 LLM 推理的做法
+  要证明的两件事：
+    - **输出完全相同**（浮点误差内）—— 缓存不改变结果，只改变代价
+    - **计算量差很多**：实测序列长度 4→512 时，两者差距从 7 倍拉到 384 倍（平方效应）
+  这正是真实代码的结构：
+      # alpamayo1_5.py:304
+      prompt_cache = vlm_outputs.past_key_values    # ← 生成时留下的 KV cache
+      expert(..., past_key_values=prompt_cache)     # ← 直接复用，不再重算
 
-    # alpamayo1_5.py:304
-    prompt_cache = vlm_outputs.past_key_values    # ← 生成时留下的 KV cache
-    expert(..., past_key_values=prompt_cache)     # ← 直接复用，不再重算
+【简化】
+  - 用一个**极小的合成因果 LM**（D_MODEL=64、2 层、词表 8）演示原理，
+    不是 release 模型测速；倍数只反映 token 处理量的平方增长
+  - 不涉及视觉 token、多相机、变长 batch，也没有真实 attention kernel 的开销差异
+  - stage13 的 `generate` 已经是增量版（同本实验的 B）；本实验的价值在于
+    把两种实现的**输出一致性**和**成本差距**都量化出来
 
-本实验用一个极小的因果语言模型，对比两种生成方式：
-    A) 每步重算整条前缀        —— stage13 现在的做法（教学简化）
-    B) 每步只算新 token + 复用 cache  —— 真实 LLM 推理的做法
-证明：输出完全相同，但计算量差很多。
-
-CPU，几秒。
+【前提】纯 CPU，几秒。不属于 stage 主线，默认不纳入回归测试。
 """
 
 import math

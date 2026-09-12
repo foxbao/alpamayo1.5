@@ -80,8 +80,8 @@ VLA = **V**ision + **L**anguage + **A**ction。Alpamayo 里：
 | 10 | `stage10_text.py` | 文本编码 | 文本 token → embedding → transformer → condition |
 | 11 | `stage11_fusion.py` | 多模态融合 | 三路 token concat + 位置编码，再由 Expert 读取（⚠️ 三路在此为冗余，只演示「怎么合」，不证明「为何必须合」） |
 | 12 | `stage12_two_cameras.py` | 多相机（文本标签） | 共享 ViT + 每路标签/图片上下文化，再 concat |
-| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer 自回归生成 CoC（**变长，见 EOS 停**）；**Part 2 用 prefix 方式重做同一任务并对比** |
-| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片一起进 CosmosReason，同样变长生成（toy 里最完整的输入侧；与真实的差距见 §六） |
+| 13 | `stage13_coc.py` | 自回归 CoC 生成 | 因果 transformer **用 KV cache 增量**自回归生成 CoC（**变长，见 EOS 停**）；**Part 2 直接用这份 cache 做 prefix 条件化并对比** |
+| 14 | `stage14_complete.py` | 完整输入 + CoC | 历史 + 图片拼成**多模态前缀**再生成 CoC，cache 同样直接复用（toy 里最完整的输入侧；与真实的差距见 §六） |
 | 15 | `stage15_cfg.py` | CFG 引导 | 条件丢弃训练 + `v=(1-w)·v_uncond + w·v_cond`，w>1 外推向量场 |
 
 **演进脉络（每个 stage 相对上一个改了什么）：**
@@ -157,12 +157,26 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 
 3. **模式切换与运行成本**：训练用 `model.train()`，评估用 `model.eval()` + `torch.no_grad()`；后者不会自动关闭 dropout。stage6~15 约 16 万～73 万参数，CPU 可运行，但速度也取决于 batch、序列长度和线程数。真实模型还包含 Expert，不能仅按 VLM 的 8B 估算显存。
 
+   **本教程刻意只用 CPU**：全部脚本不含任何 `.to(device)`，在哪儿都能跑，读代码时不会被设备管理干扰。
+   代价是慢 —— 但慢的原因**不是**没上 GPU：这些张量最大只有 `64×64×64`，单步耗时里
+   绝大部分是 Python 调度和 autograd 建图，真正的算数只占微秒级。实测同一训练步：
+   CPU 8 线程 65ms / CPU 56 线程（默认）84ms / **4090 也只要 35ms**——只快 2.3 倍，
+   因为 GPU 省不掉 Python 那一层。`common.py` 因此显式 `torch.set_num_threads(8)`：
+   小张量上默认的 56 线程同步开销大于收益（`time` 里 `user` 是 `real` 的 50 多倍就是这个原因）。
+
 4. **不要把教学观察当成收敛保证**：stage2 的 `target-x` 只是在演示收缩场，并非学得的直线流匹配速度；stage8 的平均曲率不能替代逐轨迹检查。stage13/14 按 EOS 停止做变长生成（推理链长度 6/6/3），训练时短的补齐、pad 位置用 `ignore_index` 跳过；condition 也补齐到定长，并用 `key_padding_mask` 让 Expert 的 cross-attention 忽略 pad（对应真实代码的 `_build_expert_pos_ids_and_attn_mask`）。值得记住：`ignore_index` 只让 pad 不参与 loss，**并不会阻止 pad 进入 transformer**——要真正屏蔽必须靠 attention mask。teacher forcing 与生成前缀仍有分布差异。
 
-5. **KV cache：toy 每步重算前缀，真实用缓存**。stage13 的 `generate` 每步把整条前缀重喂一遍
-   （O(n²)）；真实 LLM 推理是 prefill 一次 + 每步只算新 token（O(n)），并把缓存直接交给 Expert。
-   两者**输出相同**，但计算量随长度平方拉开（`exp_kv_cache.py` 实测：长度 4→512 时差距 7→384 倍）。
-   别把 toy 的「重跑一次拿 hidden」当成真实机制——真实里没有那第二次 forward。
+   **同一个 pad 问题在 prefix 侧会再出现一次**：变长生成会给已结束的样本补 `<pad>`，
+   这些位置也进了 cache、成了 Expert 的前缀，所以 Part 2 还要一个 `cache_pad_mask`
+   在 attention 里把它们屏蔽掉。位置不同（条件张量 / 前缀 K/V），道理完全一样。
+
+5. **KV cache：stage13/14 已经是增量的**。`generate` 先 prefill 一次，之后每步只把
+   **新 token** 喂进 CosmosReason（O(n)），产出的 cache 直接交给 prefix 版 Expert。
+   为什么能这样：因果 mask 让位置 j 的 K/V 只依赖 token 0..j，后面追加多少 token 都不影响它。
+   两种写法**输出完全相同**，只是计算量随长度平方拉开（`exp_kv_cache.py` 实测：长度 4→512 时差距 7→384 倍）。
+   注意 Part 1（cross-attn 版）**仍然要再跑一次完整 forward** —— 因为 cross-attention 要的是
+   hidden 张量而不是 K/V。这个「多出来的第二次 forward」正是两种连接方式的代价差异，
+   真实代码里没有它（`alpamayo1_5.py:304` 直接把 `past_key_values` 传给 expert）。
 
 6. **CFG 不等于曲率放大器**：stage15 对左/右目标随机丢弃条件，空条件学习两者的边缘分布，不是直行目标。各 w 共用初始噪声；w>1 不保证曲率单调增大，更不保证比条件采样安全或准确。
 
@@ -192,7 +206,8 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 | 历史轨迹 | 8~16 步序列 | **48 个 token**（16 位姿 × 3 维） | 表示 |
 | 未来轨迹 | 64 waypoints（动作空间 `(64,2)`） | `tokens_per_future_traj=128`、`traj_vocab_size=4000` | 表示 |
 | Expert hidden | 64 | **2048**（`expert_cfg.hidden_size`） | 规模 |
-| **条件机制** | **显式 cross-attention**：动作一路、条件一路，用 `attn(x, cond, cond)` 连接 | **prefix 续写**：**真实 Expert 没有任何 cross-attention**——它和 VLM 文本塔**结构完全相同**（`self_attn + MLP`），动作 token 直接**接在 VLM 序列后面**，用 self-attention 看前缀 | ⚠️ **连接拓扑不同** |
+| **条件机制** | **显式 cross-attention**：动作一路、条件一路，用 `attn(x, cond, cond)` 连接（stage13/14 的 Part 1）。<br>Part 2 已实现真实做法：动作 token 续写在前缀 K/V 后面 | **prefix 续写**：**真实 Expert 没有任何 cross-attention**——它和 VLM 文本塔**结构完全相同**（`self_attn + MLP`），动作 token 直接**接在 VLM 序列后面**，用 self-attention 看前缀 | ⚠️ **连接拓扑不同**（Part 1 vs Part 2 就是这个对比） |
+| 条件来源 | 条件张量 / generate 留下的 cache | VLM `generate()` 留下的 `past_key_values`，**含自己生成的 CoC** | 一致（Part 2） |
 | 条件长度 | 2~36 个 token（依 stage 而变） | 完整多模态前缀的逐层 K/V，含视觉，示例超过 3000 个位置 | 规模/表示 |
 | 位置编码 | 可学习 `pos_embed` | **RoPE**（旋转位置编码，Qwen 系） | 实现差异 |
 | 动作积分 | 固定 `v0` + 欧拉 + Python 循环 | 从历史**估计 v0** + **梯形积分** + `cumsum` 向量化 + **输出旋转矩阵** | 精度/工程 |
@@ -245,7 +260,11 @@ toy（两路 · cross-attention）:
 - 真实：一条数据流，动作 token「续写」在前缀后面，靠 self-attention 沟通
 
 **两者都是合法的 VLA 设计，但 toy 用的不是 Alpamayo 的设计。** 要让 toy 与真实一致，需要：
-① 层数对上；② **去掉 ExpertBlock 的 cross-attention**，改成与 `CausalBlock` 同类型；③ hidden/heads 对齐。
+① 层数对上；② **去掉 ExpertBlock 的 cross-attention**，改成与 `CacheBlock` 同类型；③ hidden/heads 对齐。
+
+**stage13/14 的 Part 2 就是这个对照实验**：同一个 backbone 产出的 cache，分别用
+cross-attn（传 hidden 张量）和 prefix（传逐层 K/V）接给 Expert —— 两种方式都能把条件
+传给动作，且 Part 2 里 `step_fn` 的签名上**根本没有 `condition` 参数**。
 
 **② CFG 的无条件分支**：toy 学了一个「空条件 embedding」来表示「无指令」；
 真实代码是**从输入序列里删掉 `<|route_start|>...<|route_end|>` 那一段**（`nav_utils.remove_nav_text`），
@@ -259,7 +278,7 @@ toy（两路 · cross-attention）:
 |---|---|---|
 | Vision Encoder（ViT） | 图 → visual tokens | `build_vit`（stage9） |
 | tokenizer + embed_tokens | 词 → 词向量 | `nn.Embedding`（即「Text Encoder」） |
-| LLM 的 transformer 层 | 自回归生成 CoC | `CausalBlock` 堆（即「Cosmos Reason Backbone」） |
+| LLM 的 transformer 层 | 自回归生成 CoC，并留下 `past_key_values` 给 Expert | `CosmosReason`（`CacheBlock` 堆）；生成出的 cache 就是 Expert 的前缀 |
 
 所以「Text Encoder」和「Cosmos Reason Backbone」**不是两个模型**，而是 Cosmos-Reason2 这一个模型内部的两部分；真正的第二个模型是 `self.expert`（Trajectory Decoder / 去噪器）。
 

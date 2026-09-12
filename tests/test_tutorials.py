@@ -148,11 +148,12 @@ def test_pairwise_distances_reject_empty_time_axis() -> None:
 
 def test_cosmos_reason_rejects_sequences_beyond_positional_capacity() -> None:
     model = common.CosmosReason(vocab_size=7, max_len=3)
+    # 第三个参数是 caches（KV cache 版），不再是 mask —— 这里不传，走 prefix 分支。
+    # prefix 2 + text 2 = 4 > max_len 3，应抛 max_len 的 ValueError。
     with pytest.raises(ValueError, match="max_len"):
         model(
             torch.zeros(1, 2, common.HIDDEN),
             torch.zeros(1, 2, dtype=torch.long),
-            common.make_causal_mask(4),
         )
 
 
