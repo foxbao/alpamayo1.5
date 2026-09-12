@@ -92,6 +92,31 @@
 <sub>考点：改条件 → 看输出是否变。① 比较「随机条件 vs 全 0 条件」；
 ② 比较「换一组 cache vs 原 cache」（因为我们跑过：0.1002 和 0.0281）</sub>
 
+**4-6** ① 和 ② 是「**进阶关系**」还是「**对等关系**」？那 toy 主线（stage4~12）为什么选 ①？
+<sub>考点：**对等** —— 两种连接拓扑，不存在「①学会了才轮到②」。
+toy 选 ① 是有理由的：条件是显式的 `(B,L,H)` 张量，stage7~12 能直接
+`print(condition.shape)` 看清「历史 8 步」「图片 17 个 patch」怎么拼的；
+② 的条件埋在 K/V 里，只能看到 `K(1,4,32,64)`，看不出里面装了什么。
+⇒ 注意别把「教学上方便」误读成「①更初级」</sub>
+
+**4-7** 推理时 **① 比 ② 多付了什么代价**？为什么？这解释了真实代码里的哪一行？
+<sub>考点：① 的 cross-attn 要的是 **hidden 张量**，所以生成完还得**再跑一次完整
+forward** 才拿得到条件；② 要的是 **K/V**，`generate()` 时本来就会产生，**白拿**。
+⇒ 这正是真实代码能一句 `expert(..., past_key_values=prompt_cache)` 的原因
+（stage13/14 的 Part 1 vs Part 2 把这条代价差直接跑出来了）</sub>
+
+**4-8** ② 里 `PrefixVLM` 和 `PrefixExpert` 用的是**同一种 block 吗**？为什么必须这样？
+<sub>考点：都是 `CacheBlock`、**同层数**（这里都是 2 层）。不同就接不上——
+cache 是「每一层一份 K/V」，层数或结构不一致，Expert 拿到的东西维度/语义都不是一套。
+⇒ 真实里对应的是 GQA：`kv_heads=8`、`head_dim=128` 在 VLM 文本塔和 Expert 上对齐，
+所以 hidden 4096(vlm) 和 2048(expert) 不同也能共用 cache（见 real3_kv_cache.py）</sub>
+
+**4-9** ② 里 `causal=True` 和 `causal=False` **分别用在哪**？为什么同一个 block 要两种？
+<sub>考点：`PrefixVLM` 里 `causal=True`（前缀是 VLM 自回归生成的，位置 i 只能看 0..i）；
+`PrefixExpert` 里 `causal=False`（64 个 waypoint 互相可见）。
+后者和 4-2 是同一个理由——**轨迹是一个整体**，不是从左到右写出来的。
+⇒ 真实里对应 `expert_non_causal_attention=True`</sub>
+
 ## Stage 5 — 组装
 
 **5-1** `MiniVLA.sample` 的三行分别对应哪三个模块？

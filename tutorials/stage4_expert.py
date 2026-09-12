@@ -129,7 +129,8 @@ class CacheBlock(nn.Module):
 
         attn = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
         if causal:                                  # 前缀内部是因果的
-            attn = attn + torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+            neg_inf = torch.full((T, T), float("-inf"), device=x.device, dtype=attn.dtype)
+            attn = attn + torch.triu(neg_inf, diagonal=1)
         # causal=False（Expert）：动作 token 可以看到 前缀 + 全部动作
         attn = torch.softmax(attn, dim=-1)
         x = x + self.proj((attn @ v).transpose(1, 2).reshape(B, T, -1))
