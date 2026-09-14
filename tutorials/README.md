@@ -218,6 +218,61 @@ Hugging Face 权限、数据和 GPU，不是 toy 主线的强制前置。
 **规模差异**不妨碍理解模块接口，但放大参数并不足以复现预训练、数据分布或实际驾驶能力。
 **哪些是「结构性的，要知道不一样」**：上面标 ⚠️ 的两条（条件机制、CFG）。
 
+---
+
+### ★ 离散轨迹 token 的去向（一个很容易踩的盲点）
+
+上表里那行 `traj_vocab_size=4000` 值得单独讲——**因为 toy 完全没有对应物**，
+而且它容易让人对「VLM 到底输出什么」产生错误印象。
+
+真实 VLM 的词表里**额外塞了 4000 个 token**：`<i0>` … `<i3999>`
+（`base_model.py:271`，`[f"<i{v}>" for v in range(4000)]`）。
+每个 `<iK>` 是轨迹动作的一个**量化刻度**（64 waypoint × 2 维 = **128 个 token 描述一条轨迹**，
+`tokens_per_future_traj=128`）。它们在这条链的四个环节里待遇完全不同：
+
+| 环节 | 这 4000 个 token 的地位 |
+|---|---|
+| **输入**（历史轨迹） | ✅ **是**离散 token——`fuse_traj_tokens` 把 `ego_history_xyz/rot` 量化后塞进序列（**48 个**） |
+| **SFT 阶段一的训练目标** | ✅ VLM **学着预测**未来轨迹的 128 个 `<iK>` |
+| **发布推理的生成输出** | ❌ **一个都不会出现**——见下 |
+| **RL** | ✅ **就是靠它们**（离散 token 的 log-prob 好算，策略梯度直接可得） |
+
+**发布推理为什么一个都没有**：`generate()` 时挂了两个东西
+
+```python
+# alpamayo1_5.py:282-290
+ExpertLogitsProcessor(traj_token_offset=..., traj_vocab_size=4000)   # 把这 4000 个 logits 设成 -inf
+StopAfterEOS(eos_token_id=<traj_future_start>)                       # 生成到它就停
+```
+
+`ExpertLogitsProcessor.__call__` 的核心就一行：
+
+```python
+scores[:, offset : offset + traj_vocab_size] = float("-inf")
+```
+
+**概率为 0 ⟹ 永远采不出来。** 所以推理时 VLM 的实际行为是：
+
+```
+输入： [历史轨迹 token ×48] + [图片] + [指令/CoC 提示]
+  ↓  VLM 自回归生成
+输出： CoC 文本（"shift left due to ..."） + <traj_future_start>   ←—— 到此为止
+  ↓  _find_eos_offset 定位到 <traj_future_start> 之后（offset = pos+1）
+  ↓  把这一段 KV cache 当 expert 的 past_key_values
+expert： 从噪声积分出【连续】轨迹，(64, 2) 个浮点数
+```
+
+**一句话**：推理时 VLM 的输出里**没有离散轨迹**，只有 CoC 文本 + 一个 `<traj_future_start>`；
+轨迹是 expert 用连续 flow matching 出的。那 128 个 `<iK>` 只活在**训练**和 **RL** 里。
+
+> ⚠️ 源码注释写明了屏蔽的理由：*"not used for the expert model thus masking them out
+> **for better CoC generation**"*——不屏蔽的话，模型可能在写 CoC 的中途就吐出一串 `<i..>`，
+> 把推理文本打断。
+
+> 这也解释了训练教程里为什么会有 `kv_cache.crop(...)` 这一步：**SFT 阶段二训练时**，
+> teacher forcing 的序列里 `<traj_future_start>` 后面**跟着真值的 128 个 `<iK>`**，
+> 不裁掉，expert 的前缀里就装着标准答案（标签泄漏）。
+
 ### 关键的两个「结构差异」（务必知道）
 
 **① 条件机制**：toy 用显式的第二个 attention（`cross_attn(query=动作, key/value=条件)`）；
